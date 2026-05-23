@@ -1,0 +1,7 @@
+# Python dependencies for the mission LSTM assistant
+# The runtime assistant is optional and degrades gracefully if torch is missing.
+
+numpy>=1.24
+opencv-python>=4.8
+# Training + inference checkpoint support
+torch>=2.1

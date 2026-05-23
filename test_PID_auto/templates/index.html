@@ -1,0 +1,1705 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Station Ground Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --bg-elevated: #30363d;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-amber: #d29922;
+            --accent-red: #f85149;
+            --accent-purple: #a371f7;
+            --text-primary: #f0f6fc;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --border-default: #30363d;
+            --border-muted: #21262d;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+            --shadow-lg: 0 8px 24px rgba(0,0,0,0.5);
+            --shadow-glow-blue: 0 0 20px rgba(88,166,255,0.3);
+            --shadow-glow-green: 0 0 20px rgba(63,185,80,0.3);
+            --shadow-glow-amber: 0 0 20px rgba(210,153,34,0.3);
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * { box-sizing: border-box; }
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+        body {
+            padding: 12px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            display: flex;
+            gap: 12px;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+        }
+
+        .panel {
+            background: linear-gradient(145deg, var(--bg-secondary) 0%, var(--bg-secondary) 100%);
+            border: 1px solid var(--border-default);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            box-shadow: var(--shadow-md);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .panel::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--border-default), transparent);
+        }
+
+        .sidebar {
+            width: 280px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            max-height: 100vh;
+            padding-right: 4px;
+        }
+        .sidebar::-webkit-scrollbar { width: 4px; }
+        .sidebar::-webkit-scrollbar-track { background: var(--bg-tertiary); }
+        .sidebar::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 2px; }
+
+        .main {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 0;
+            overflow: hidden;
+        }
+
+        .charts-row {
+            flex: 1;
+            display: flex;
+            gap: 12px;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .chart-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .chart-wrapper {
+            flex: 1;
+            position: relative;
+            min-height: 0;
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-muted);
+            overflow: hidden;
+        }
+
+        .chart-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-muted);
+        }
+
+        .panel-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: var(--radius-md);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .panel-icon.controller { background: linear-gradient(135deg, var(--accent-blue), #1f6feb); }
+        .panel-icon.telemetry { background: linear-gradient(135deg, var(--accent-purple), #8957e5); }
+        .panel-icon.ai { background: linear-gradient(135deg, var(--accent-amber), #bf8700); }
+
+        .panel-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin: 0;
+            letter-spacing: -0.01em;
+        }
+
+        .panel-subtitle {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin: 2px 0 0 0;
+        }
+
+        h2 { margin: 0; font-size: 18px; color: var(--text-secondary); font-weight: 500; }
+
+        /* D-Pad Section */
+        .dpad-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px 0;
+        }
+
+        .dpad {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            width: 220px;
+        }
+
+        .dpad-btn {
+            aspect-ratio: 1;
+            background: linear-gradient(145deg, var(--bg-tertiary), var(--bg-secondary));
+            border: 1px solid var(--border-default);
+            border-radius: var(--radius-md);
+            color: var(--text-secondary);
+            font-size: 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s ease;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255,255,255,0.05);
+        }
+
+        .dpad-btn:hover {
+            background: linear-gradient(145deg, var(--bg-elevated), var(--bg-tertiary));
+            border-color: var(--accent-blue);
+            color: var(--accent-blue);
+        }
+
+        .dpad-btn:active, .dpad-btn.pressed {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+            color: #fff;
+            transform: scale(0.92);
+            box-shadow: var(--shadow-glow-blue);
+        }
+
+        .dpad-btn:focus-visible {
+            outline: 2px solid var(--accent-blue);
+            outline-offset: 2px;
+        }
+
+        .dpad-btn svg {
+            width: 28px;
+            height: 28px;
+            stroke: currentColor;
+            stroke-width: 2.5;
+            fill: none;
+        }
+
+        .dpad-center {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-stop {
+            background: linear-gradient(145deg, #2d1f1f, #1a1212);
+            border: 2px solid var(--accent-red);
+            color: var(--accent-red);
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .btn-stop:active, .btn-stop.pressed {
+            background: var(--accent-red);
+            color: #fff;
+            box-shadow: 0 0 24px rgba(248,81,73,0.5);
+        }
+
+        /* PID Section */
+        .section {
+            margin-top: 24px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .section-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-default);
+        }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: -0.01em;
+        }
+
+        .pid-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .pid-row {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 14px;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-muted);
+        }
+
+        .pid-label {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .pid-name {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .pid-desc {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .pid-input {
+            width: 85px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-default);
+            border-radius: var(--radius-sm);
+            color: var(--accent-blue);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 15px;
+            font-weight: 500;
+            padding: 8px 10px;
+            text-align: center;
+            transition: all 0.2s ease;
+        }
+
+        .pid-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 3px rgba(88,166,255,0.15);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 14px 20px;
+            background: linear-gradient(145deg, var(--bg-tertiary), var(--bg-secondary));
+            border: 1px solid var(--border-default);
+            border-radius: var(--radius-md);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 16px;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .btn:hover {
+            background: linear-gradient(145deg, var(--bg-elevated), var(--bg-tertiary));
+            border-color: var(--accent-blue);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn:focus-visible {
+            outline: 2px solid var(--accent-blue);
+            outline-offset: 2px;
+        }
+
+        .btn-auto-drive {
+            background: linear-gradient(145deg, #1a2f1a, #0d1a0d);
+            border-color: var(--accent-green);
+        }
+
+        .btn-auto-drive.active {
+            background: linear-gradient(145deg, #2d1f1f, #1a1212);
+            border-color: var(--accent-red);
+        }
+
+        .btn-icon {
+            font-size: 16px;
+        }
+
+        /* Speed Slider */
+        .speed-control {
+            padding: 16px 0;
+            border-top: 1px solid var(--border-muted);
+            border-bottom: 1px solid var(--border-muted);
+            margin-bottom: 4px;
+        }
+
+        .gripper-control {
+            padding: 16px 0;
+            border-top: 1px solid var(--border-muted);
+            border-bottom: 1px solid var(--border-muted);
+            margin-bottom: 4px;
+        }
+        .gripper-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        .gripper-badge {
+            margin-left: auto;
+            font-family: var(--font-mono);
+            font-size: 14px;
+            background: var(--accent-blue);
+            color: #fff;
+            padding: 2px 10px;
+            border-radius: 12px;
+        }
+        .gripper-slider {
+            width: 100%;
+            -webkit-appearance: none;
+            height: 6px;
+            border-radius: 3px;
+            background: var(--bg-tertiary);
+            outline: none;
+        }
+        .gripper-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            cursor: pointer;
+        }
+        .gripper-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border: none;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            cursor: pointer;
+        }
+
+        .speed-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 14px;
+        }
+
+        .speed-badge {
+            margin-left: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        .speed-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 6px;
+            background: var(--bg-elevated);
+            border-radius: 3px;
+            outline: none;
+            cursor: pointer;
+            accent-color: var(--accent-blue);
+        }
+
+        .speed-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(88,166,255,0.5);
+            transition: box-shadow 0.2s ease;
+        }
+
+        .speed-slider:hover::-webkit-slider-thumb {
+            box-shadow: 0 0 18px rgba(88,166,255,0.8);
+        }
+
+        .speed-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border: none;
+            border-radius: 50%;
+            background: var(--accent-blue);
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(88,166,255,0.5);
+        }
+
+        /* AI Toggle */
+        .ai-section {
+            margin-top: auto;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-muted);
+        }
+
+        .ai-toggle {
+            position: relative;
+            width: 100%;
+            padding: 16px 20px;
+            background: linear-gradient(145deg, #1a1520, #12101a);
+            border: 2px solid var(--accent-purple);
+            border-radius: var(--radius-md);
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            overflow: hidden;
+        }
+
+        .ai-toggle::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(163,113,247,0.1), transparent);
+            transition: left 0.5s ease;
+        }
+
+        .ai-toggle:hover::before {
+            left: 100%;
+        }
+
+        .ai-toggle.active {
+            background: linear-gradient(145deg, #2d2618, #1f1a10);
+            border-color: var(--accent-amber);
+            box-shadow: var(--shadow-glow-amber);
+        }
+
+        .ai-toggle.active .ai-status {
+            background: var(--accent-amber);
+            box-shadow: 0 0 12px var(--accent-amber);
+        }
+
+        .ai-icon {
+            font-size: 20px;
+        }
+
+        .ai-info {
+            flex: 1;
+            text-align: left;
+        }
+
+        .ai-label {
+            display: block;
+        }
+
+        .ai-status {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: all 0.3s ease;
+        }
+
+        .chart-legend {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .legend-dot.yaw { background: var(--accent-amber); }
+        .legend-dot.pid { background: var(--accent-blue); }
+
+        .legend-label {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+        }
+
+        .legend-value {
+            margin-left: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .legend-value.yaw { color: var(--accent-amber); }
+        .legend-value.pid { color: var(--accent-blue); }
+
+        /* Console */
+        .console-wrapper {
+            flex-shrink: 0;
+        }
+
+        .console {
+            background: linear-gradient(145deg, #0a0d10, #0d1117);
+            border: 1px solid var(--border-default);
+            border-radius: var(--radius-md);
+            padding: 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--accent-green);
+            min-height: 56px;
+            box-shadow: inset 0 2px 8px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .console-line {
+            display: flex;
+            gap: 12px;
+        }
+
+        .console-time {
+            color: var(--text-muted);
+            flex-shrink: 0;
+        }
+
+        .console-msg {
+            color: var(--accent-green);
+        }
+
+        .console-msg.warning {
+            color: var(--accent-amber);
+        }
+
+        .console-msg.error {
+            color: var(--accent-red);
+        }
+
+        /* Status Bar */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 12px 16px;
+            background: var(--bg-tertiary);
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-muted);
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            box-shadow: 0 0 8px var(--accent-green);
+        }
+
+        .status-dot.warning { background: var(--accent-amber); box-shadow: 0 0 8px var(--accent-amber); }
+        .status-dot.error { background: var(--accent-red); box-shadow: 0 0 8px var(--accent-red); }
+
+        /* Connection mode toggle */
+        .conn-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: auto;
+        }
+        .conn-btn {
+            padding: 4px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border-default);
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            letter-spacing: 0.05em;
+        }
+        .conn-btn.active {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+            color: #fff;
+            box-shadow: 0 0 10px rgba(88,166,255,0.4);
+        }
+        .conn-btn.active.usb {
+            background: var(--accent-purple);
+            border-color: var(--accent-purple);
+            box-shadow: 0 0 10px rgba(163,113,247,0.4);
+        }
+        .conn-select {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-default);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-size: 11px;
+            padding: 3px 6px;
+            display: none;
+        }
+
+        /* Animations */
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: var(--shadow-glow-amber); }
+            50% { box-shadow: 0 0 30px rgba(210,153,34,0.5); }
+        }
+
+        .ai-toggle.active {
+            animation: pulse-glow 1.5s ease-in-out infinite;
+        }
+
+        @keyframes data-flow {
+            0% { background-position: 0% 50%; }
+            100% { background-position: 200% 50%; }
+        }
+
+        /* Ultrasons Section */
+        .us-section {
+            margin-top: 16px;
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-muted);
+            border-radius: var(--radius-md);
+        }
+        .us-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+        .us-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .us-toggle {
+            width: 44px;
+            height: 24px;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-default);
+            border-radius: 12px;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.2s ease;
+        }
+        .us-toggle.active {
+            background: var(--accent-green);
+            border-color: var(--accent-green);
+        }
+        .us-toggle::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            background: var(--text-primary);
+            border-radius: 50%;
+            transition: transform 0.2s ease;
+        }
+        .us-toggle.active::after {
+            transform: translateX(20px);
+        }
+        .us-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 8px;
+        }
+        .us-sensor {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-default);
+            border-radius: var(--radius-sm);
+            font-size: 11px;
+        }
+        .us-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--accent-red);
+            transition: background 0.2s ease;
+        }
+        .us-indicator.ok {
+            background: var(--accent-green);
+            box-shadow: 0 0 8px rgba(63,185,80,0.5);
+        }
+        .us-info {
+            flex: 1;
+        }
+        .us-label {
+            color: var(--text-muted);
+            font-size: 10px;
+        }
+        .us-value {
+            color: var(--text-primary);
+            font-weight: 600;
+            font-family: var(--font-mono);
+        }
+        .us-stop-alert {
+            margin-top: 8px;
+            padding: 6px 10px;
+            background: rgba(248,81,73,0.2);
+            border: 1px solid var(--accent-red);
+            border-radius: var(--radius-sm);
+            color: var(--accent-red);
+            font-size: 11px;
+            font-weight: 600;
+            text-align: center;
+            display: none;
+        }
+        .us-stop-alert.active {
+            display: block;
+            animation: pulse-glow 1s ease-in-out infinite;
+        }
+
+        @media (max-width: 900px) {
+            body { flex-direction: column; overflow-y: auto; height: auto; }
+            .sidebar { width: 100%; max-height: none; flex-shrink: 0; }
+            .main { min-height: 60vh; }
+            .charts-row { flex-direction: column; }
+            .dpad { width: 180px; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="panel sidebar">
+        <div class="panel-header">
+            <div class="panel-icon controller">🎮</div>
+            <div>
+                <h2 class="panel-title">Télécommande</h2>
+                <p class="panel-subtitle">Contrôle manuel du robot</p>
+            </div>
+        </div>
+
+        <div class="dpad-wrapper">
+            <div class="dpad">
+                <div></div>
+                <button class="dpad-btn" id="btn-up" aria-label="Avancer">
+                    <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                </button>
+                <div></div>
+                <button class="dpad-btn" id="btn-left" aria-label="Gauche">
+                    <svg viewBox="0 0 24 24"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+                </button>
+                <div class="dpad-center">
+                    <button class="dpad-btn btn-stop" id="btn-stop" aria-label="Arrêt">STOP</button>
+                </div>
+                <button class="dpad-btn" id="btn-right" aria-label="Droite">
+                    <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                </button>
+                <div></div>
+                <button class="dpad-btn" id="btn-down" aria-label="Reculer">
+                    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+                </button>
+                <div></div>
+            </div>
+        </div>
+
+        <div class="gripper-control">
+            <div class="gripper-header">
+                <div class="section-icon">🤏</div>
+                <span class="section-title">Gripper</span>
+                <span id="gripper-val" class="gripper-badge">90°</span>
+            </div>
+            <input type="range" id="gripper-slider" min="0" max="180" value="90" class="gripper-slider">
+        </div>
+
+        <div class="speed-control">
+            <div class="speed-header">
+                <div class="section-icon">⚡</div>
+                <span class="section-title">Vitesse manuelle</span>
+                <span class="speed-badge" id="speed-display">60%</span>
+            </div>
+            <input type="range" class="speed-slider" id="manual-speed"
+                   min="10" max="100" value="60" step="5"
+                   aria-label="Vitesse manuelle">
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-icon">🤖</div>
+                <span class="section-title">Mode Auto</span>
+            </div>
+            <div class="pid-grid">
+                <div class="pid-row">
+                    <div class="pid-label">
+                        <span class="pid-name">Distance (cm)</span>
+                        <span class="pid-desc">Distance à parcourir</span>
+                    </div>
+                    <input type="number" class="pid-input" id="val-distance" value="100" step="10" aria-label="Distance">
+                </div>
+                <div class="pid-row">
+                    <div class="pid-label">
+                        <span class="pid-name">Vitesse (%)</span>
+                        <span class="pid-desc">Puissance moteur</span>
+                    </div>
+                    <input type="number" class="pid-input" id="val-speed" value="50" min="10" max="100" step="5" aria-label="Speed">
+                </div>
+            </div>
+            <button class="btn btn-auto-drive" id="btn-auto-drive">
+                <span class="btn-icon">🚀</span>
+                Démarrer Auto
+            </button>
+        </div>
+
+        <div class="section">
+            <div class="section-header">
+                <div class="section-icon">⚙️</div>
+                <span class="section-title">Paramètres PID</span>
+            </div>
+            <div class="pid-grid">
+                <div class="pid-row">
+                    <div class="pid-label">
+                        <span class="pid-name">Kp — Proportionnel</span>
+                        <span class="pid-desc">Réponse aux erreurs actuelles</span>
+                    </div>
+                    <input type="number" class="pid-input" id="val-kp" value="4.0" step="0.1" aria-label="Kp">
+                </div>
+                <div class="pid-row">
+                    <div class="pid-label">
+                        <span class="pid-name">Ki — Intégral</span>
+                        <span class="pid-desc">Élimine l'erreur cumulée</span>
+                    </div>
+                    <input type="number" class="pid-input" id="val-ki" value="0.08" step="0.01" aria-label="Ki">
+                </div>
+                <div class="pid-row">
+                    <div class="pid-label">
+                        <span class="pid-name">Kd — Dérivée</span>
+                        <span class="pid-desc">Anticipe les changements</span>
+                    </div>
+                    <input type="number" class="pid-input" id="val-kd" value="0.6" step="0.1" aria-label="Kd">
+                </div>
+            </div>
+            <button class="btn" id="btn-save-pid">
+                <span class="btn-icon">💾</span>
+                Envoyer Paramètres
+            </button>
+        </div>
+
+        <div class="ai-section">
+            <button class="ai-toggle" id="btn-toggle-ia">
+                <span class="ai-icon">🧠</span>
+                <div class="ai-info">
+                    <span class="ai-label">Deep RL (LSTM)</span>
+                </div>
+                <span class="ai-status"></span>
+            </button>
+        </div>
+
+        <div class="us-section">
+            <div class="us-header">
+                <div class="us-title">
+                    <div class="section-icon">📡</div>
+                    Ultrasons
+                </div>
+                <div class="us-toggle active" id="us-toggle" title="Activer/Désactiver les capteurs"></div>
+            </div>
+            <div class="us-grid">
+                <div class="us-sensor">
+                    <div class="us-indicator ok" id="us1-ind"></div>
+                    <div class="us-info">
+                        <div class="us-label">Avant-G 45°</div>
+                        <div class="us-value" id="us1-val">-- cm</div>
+                    </div>
+                </div>
+                <div class="us-sensor">
+                    <div class="us-indicator ok" id="us2-ind"></div>
+                    <div class="us-info">
+                        <div class="us-label">Avant-D 45°</div>
+                        <div class="us-value" id="us2-val">-- cm</div>
+                    </div>
+                </div>
+                <div class="us-sensor">
+                    <div class="us-indicator ok" id="us3-ind"></div>
+                    <div class="us-info">
+                        <div class="us-label">Arrière-G 45°</div>
+                        <div class="us-value" id="us3-val">-- cm</div>
+                    </div>
+                </div>
+                <div class="us-sensor">
+                    <div class="us-indicator ok" id="us4-ind"></div>
+                    <div class="us-info">
+                        <div class="us-label">Arrière-D 45°</div>
+                        <div class="us-value" id="us4-val">-- cm</div>
+                    </div>
+                </div>
+            </div>
+            <div class="us-stop-alert" id="us-stop-alert">🐌 RALENTI - VITESSE LIMITÉE</div>
+        </div>
+    </div>
+
+    <div class="panel main">
+        <div class="panel-header">
+            <div class="panel-icon telemetry">📊</div>
+            <div>
+                <h2 class="panel-title">Télemetry & Console</h2>
+                <p class="panel-subtitle">Données temps réel du robot</p>
+            </div>
+        </div>
+
+        <div class="console-wrapper">
+            <div class="console" id="ia-console">
+                <div class="console-line">
+                    <span class="console-time">[--:--:--]</span>
+                    <span class="console-msg">Réseau LSTM prêt. En attente d'activation...</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="charts-row">
+            <div class="chart-panel">
+                <div class="chart-legend">
+                    <span class="legend-dot yaw"></span>
+                    <span class="legend-label">Dérive YAW</span>
+                    <span class="legend-value yaw" id="yaw-value">0.00°</span>
+                </div>
+                <div class="chart-wrapper">
+                    <canvas class="chart-canvas" id="yawChart"></canvas>
+                </div>
+            </div>
+            <div class="chart-panel">
+                <div class="chart-legend">
+                    <span class="legend-dot pid"></span>
+                    <span class="legend-label">Effort PID</span>
+                    <span class="legend-value pid" id="pid-value">0.00</span>
+                </div>
+                <div class="chart-wrapper">
+                    <canvas class="chart-canvas" id="pidChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="charts-row">
+            <div class="chart-panel" style="flex: 2;">
+                <div class="chart-legend">
+                    <span class="legend-dot" style="background: var(--accent-green);"></span>
+                    <span class="legend-label">Position Robot</span>
+                    <span class="legend-value" id="pos-value">X: 0.00m Y: 0.00m</span>
+                    <button id="btn-reset-pos" style="margin-left: auto; font-size: 11px; padding: 4px 8px; background: var(--bg-tertiary); border: 1px solid var(--border-default); border-radius: 4px; color: var(--text-secondary); cursor: pointer;">↺ Reset</button>
+                </div>
+                <div class="chart-wrapper">
+                    <canvas class="chart-canvas" id="trajectoryCanvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="status-dot"></span>
+                <span>Connecté</span>
+            </div>
+            <div class="status-item">
+                <span class="status-dot"></span>
+                <span>PID Auto</span>
+            </div>
+            <div class="status-item" id="auto-status">
+                <span class="status-dot warning" id="auto-dot"></span>
+                <span>Auto</span>
+            </div>
+            <div class="status-item" id="ia-status">
+                <span class="status-dot"></span>
+                <span>IA Inactive</span>
+            </div>
+            <div class="conn-toggle">
+                <select class="conn-select" id="port-select"></select>
+                <button class="conn-btn active" id="btn-conn-wifi">WiFi</button>
+                <button class="conn-btn usb" id="btn-conn-usb">USB</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let ds = { F: 0, B: 0, L: 0, R: 0 };
+        let jt = null;
+        let socketConnected = false;
+        let reconnectTimer = null;
+
+        function connectSocket() {
+            if (socketConnected) return;
+            socket.connect();
+        }
+
+        socket.on('connect', () => {
+            socketConnected = true;
+            console.log('[SOCKET] Connected to server');
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        });
+        socket.on('disconnect', () => {
+            socketConnected = false;
+            console.log('[SOCKET] Disconnected - retrying in 2s');
+            reconnectTimer = setTimeout(connectSocket, 2000);
+        });
+        socket.on('connect_error', (err) => {
+            console.log('[SOCKET] Connection error:', err.message);
+        });
+        socket.on('telemetry', (data) => { /* handled below */ });
+
+        // Chart setup with enhanced styling
+        const chartOptions = {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            plugins: {
+                legend: { display: false }
+            },
+            scales: {
+                x: {
+                    display: false,
+                    grid: { color: 'rgba(48,54,61,0.5)' }
+                },
+                y: {
+                    grid: {
+                        color: 'rgba(48,54,61,0.5)',
+                        drawBorder: false
+                    },
+                    ticks: {
+                        color: '#6e7681',
+                        font: { family: "'JetBrains Mono', monospace", size: 10 },
+                        maxTicksLimit: 5
+                    }
+                }
+            },
+            elements: {
+                point: { radius: 0 },
+                line: { tension: 0.3 }
+            }
+        };
+
+        const labels = Array.from({length: 50}, (_, i) => i);
+
+        const yawChart = new Chart(document.getElementById('yawChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'YAW',
+                    data: Array(50).fill(null),
+                    borderColor: '#d29922',
+                    backgroundColor: 'rgba(210,153,34,0.1)',
+                    fill: true,
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                ...chartOptions,
+                scales: {
+                    ...chartOptions.scales,
+                    y: {
+                        ...chartOptions.scales.y,
+                        suggestedMin: -10,
+                        suggestedMax: 10
+                    }
+                }
+            }
+        });
+
+        const pidChart = new Chart(document.getElementById('pidChart').getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'PID',
+                    data: Array(50).fill(null),
+                    borderColor: '#58a6ff',
+                    backgroundColor: 'rgba(88,166,255,0.1)',
+                    fill: true,
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                ...chartOptions,
+                scales: {
+                    ...chartOptions.scales,
+                    y: {
+                        ...chartOptions.scales.y,
+                        suggestedMin: -50,
+                        suggestedMax: 50
+                    }
+                }
+            }
+        });
+
+        const yawValue = document.getElementById('yaw-value');
+        const pidValue = document.getElementById('pid-value');
+
+        // Ultrasons elements
+        const usToggle = document.getElementById('us-toggle');
+        const usIndicators = [
+            document.getElementById('us1-ind'),
+            document.getElementById('us2-ind'),
+            document.getElementById('us3-ind'),
+            document.getElementById('us4-ind')
+        ];
+        const usValues = [
+            document.getElementById('us1-val'),
+            document.getElementById('us2-val'),
+            document.getElementById('us3-val'),
+            document.getElementById('us4-val')
+        ];
+        const usStopAlert = document.getElementById('us-stop-alert');
+        let usEnabled = true;
+
+        usToggle.addEventListener('click', () => {
+            usEnabled = !usEnabled;
+            usToggle.classList.toggle('active', usEnabled);
+            socket.emit('toggle_us', { enabled: usEnabled });
+        });
+
+        socket.on('us_status', (data) => {
+            usEnabled = data.enabled;
+            usToggle.classList.toggle('active', usEnabled);
+        });
+
+        function updateUltrasons(data) {
+            if (!data.us || !data.usr) return;
+            
+            // Update toggle state from telemetry
+            if (data.use !== undefined) {
+                usEnabled = data.use === 1;
+                usToggle.classList.toggle('active', usEnabled);
+            }
+            
+            // Check for speed limit from telemetry
+            let speedLimit = 1.0;
+            if (data.usl !== undefined) {
+                speedLimit = data.usl;
+            }
+            const isLimited = speedLimit < 0.95;
+            
+            for (let i = 0; i < 4; i++) {
+                const distance = data.us[i];
+                const responding = data.usr[i] === 1;
+                
+                // Update indicator (green = responding, red = not responding)
+                usIndicators[i].classList.toggle('ok', responding);
+                
+                // Update value
+                if (responding && distance > 0) {
+                    usValues[i].textContent = distance.toFixed(1) + ' cm';
+                } else {
+                    usValues[i].textContent = '-- cm';
+                }
+            }
+            
+            // Show/hide speed limit alert with percentage
+            if (isLimited) {
+                usStopAlert.textContent = '🐌 RALENTI - ' + Math.round(speedLimit * 100) + '% VITESSE';
+            }
+            usStopAlert.classList.toggle('active', isLimited);
+        }
+
+        socket.on('telemetry', (data) => {
+            yawChart.data.datasets[0].data.push(data.y);
+            yawChart.data.datasets[0].data.shift();
+            yawChart.update('none');
+
+            const pidVal = data.p !== undefined ? data.p : 0;
+            pidChart.data.datasets[0].data.push(pidVal);
+            pidChart.data.datasets[0].data.shift();
+            pidChart.update('none');
+
+            yawValue.textContent = (data.y || 0).toFixed(2) + '°';
+            pidValue.textContent = pidVal.toFixed(2);
+            
+            // Update ultrasons
+            updateUltrasons(data);
+            
+            // Update robot position/trajectory
+            updatePosition(data);
+        });
+
+        // AI Toggle (désactivée par défaut - cohérent avec le backend)
+        let iaActive = false;
+        const btnIa = document.getElementById('btn-toggle-ia');
+        const iaConsole = document.getElementById('ia-console');
+        const iaStatus = document.getElementById('ia-status');
+        iaStatus.querySelector('span:last-child').textContent = 'IA Inactive';
+        updateConsole('Réseau LSTM prêt. En attente d\'activation...', '');
+
+        btnIa.addEventListener('click', () => {
+            iaActive = !iaActive;
+            btnIa.classList.toggle('active', iaActive);
+            btnIa.querySelector('.ai-label').textContent = iaActive ? 'Apprentissage LSTM actif...' : 'Deep RL (LSTM)';
+            iaStatus.querySelector('span:last-child').textContent = iaActive ? 'IA Active' : 'IA Inactive';
+            updateConsole(iaActive ? 'Analyse de la physique en cours...' : 'Réseau LSTM désactivé.', iaActive ? 'warning' : '');
+            socket.emit('toggle_auto', { active: iaActive });
+        });
+
+        socket.on('ia_update', (data) => {
+            const kp = typeof data.kp === 'number' ? data.kp.toFixed(2) : '0.00';
+            const ki = typeof data.ki === 'number' ? data.ki.toFixed(2) : (document.getElementById('val-ki').value || '0.00');
+            const kd = typeof data.kd === 'number' ? data.kd.toFixed(2) : '0.00';
+            document.getElementById('val-kp').value = kp;
+            document.getElementById('val-ki').value = ki;
+            document.getElementById('val-kd').value = kd;
+            const time = new Date().toLocaleTimeString('fr-FR');
+            const safeMsg = String(data.msg || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            iaConsole.innerHTML = `
+                <div class="console-line">
+                    <span class="console-time">[${time}]</span>
+                    <span class="console-msg">${safeMsg}</span>
+                </div>
+                <div class="console-line">
+                    <span class="console-time"></span>
+                    <span class="console-msg">Kp=${kp} | Ki=${ki} | Kd=${kd}</span>
+                </div>`;
+        });
+
+        function sendPid() {
+            socket.emit('manual_pid', {
+                kp: parseFloat(document.getElementById('val-kp').value),
+                ki: parseFloat(document.getElementById('val-ki').value),
+                kd: parseFloat(document.getElementById('val-kd').value)
+            });
+        }
+
+        document.getElementById('btn-save-pid').addEventListener('click', () => {
+            sendPid();
+            updateConsole('Paramètres PID envoyés.', '');
+        });
+
+        // Auto-send PID on input change (debounced 600ms)
+        let pidTimer = null;
+        ['val-kp', 'val-ki', 'val-kd'].forEach(id => {
+            document.getElementById(id).addEventListener('input', () => {
+                clearTimeout(pidTimer);
+                pidTimer = setTimeout(sendPid, 600);
+            });
+        });
+
+        // Clamp val-speed to 0-100
+        document.getElementById('val-speed').addEventListener('input', (e) => {
+            const v = parseFloat(e.target.value);
+            if (v > 100) e.target.value = 100;
+            if (v < 0)   e.target.value = 0;
+        });
+
+        function updateConsole(msg, type) {
+            const time = new Date().toLocaleTimeString('fr-FR');
+            iaConsole.innerHTML = `
+                <div class="console-line">
+                    <span class="console-time">[${time}]</span>
+                    <span class="console-msg ${type}">${msg}</span>
+                </div>`;
+        }
+
+        // Trajectory / Position Tracking
+        const trajCanvas = document.getElementById('trajectoryCanvas');
+        const posValue = document.getElementById('pos-value');
+        const btnResetPos = document.getElementById('btn-reset-pos');
+        
+        let robotPos = { x: 0, y: 0, yaw: 0 };
+        let pathHistory = [];
+        const MAX_PATH_POINTS = 500;
+        const SCALE = 20; // pixels per meter
+        let lastTelemetryTime = null;
+        
+        // === KALMAN FILTER pour vitesse (réduit le bruit de 30%) ===
+        class KalmanFilter {
+            constructor(processNoise = 0.01, measurementNoise = 0.1) {
+                this.x = 0;          // Estimate
+                this.P = 1;          // Error estimate
+                this.Q = processNoise;   // Process noise
+                this.R = measurementNoise; // Measurement noise
+                this.K = 0;          // Kalman gain
+            }
+            
+            update(measurement) {
+                // Prediction update
+                this.P = this.P + this.Q;
+                
+                // Measurement update
+                this.K = this.P / (this.P + this.R);
+                this.x = this.x + this.K * (measurement - this.x);
+                this.P = (1 - this.K) * this.P;
+                
+                return this.x;
+            }
+            
+            reset() {
+                this.x = 0;
+                this.P = 1;
+            }
+        }
+        
+        // Filtres Kalman pour vx et vy (séparés)
+        const kfVx = new KalmanFilter(0.005, 0.05);  // Process noise faible = lissage important
+        const kfVy = new KalmanFilter(0.005, 0.05);
+        const kfSpeed = new KalmanFilter(0.01, 0.1); // Pour la vitesse scalaire
+        
+        // Historique pour lissage complémentaire
+        const SPEED_HISTORY_SIZE = 5;
+        let speedHistory = [];
+        
+        function getSmoothedSpeed(newSpeed) {
+            speedHistory.push(newSpeed);
+            if (speedHistory.length > SPEED_HISTORY_SIZE) {
+                speedHistory.shift();
+            }
+            // Moyenne pondérée (plus récent = plus de poids)
+            let sum = 0, weightSum = 0;
+            for (let i = 0; i < speedHistory.length; i++) {
+                const weight = (i + 1) / speedHistory.length; // 0.2 à 1.0
+                sum += speedHistory[i] * weight;
+                weightSum += weight;
+            }
+            return sum / weightSum;
+        }
+        
+        function resizeTrajCanvas() {
+            const wrapper = trajCanvas.parentElement;
+            trajCanvas.width = wrapper.clientWidth;
+            trajCanvas.height = wrapper.clientHeight;
+            drawTrajectory();
+        }
+        
+        function drawTrajectory() {
+            const ctx = trajCanvas.getContext('2d');
+            const w = trajCanvas.width;
+            const h = trajCanvas.height;
+            const cx = w / 2;
+            const cy = h / 2;
+            
+            // Clear
+            ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg-tertiary');
+            ctx.fillRect(0, 0, w, h);
+            
+            // Grid
+            ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--border-default');
+            ctx.lineWidth = 1;
+            ctx.setLineDash([5, 5]);
+            for (let i = 0; i < w; i += SCALE) {
+                ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, h); ctx.stroke();
+            }
+            for (let i = 0; i < h; i += SCALE) {
+                ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(w, i); ctx.stroke();
+            }
+            ctx.setLineDash([]);
+            
+            // Origin cross
+            ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--text-muted');
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(cx - 10, cy); ctx.lineTo(cx + 10, cy); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(cx, cy - 10); ctx.lineTo(cx, cy + 10); ctx.stroke();
+            
+            // Path history
+            if (pathHistory.length > 1) {
+                ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--accent-blue');
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let i = 0; i < pathHistory.length; i++) {
+                    const px = cx + pathHistory[i].x * SCALE;
+                    const py = cy - pathHistory[i].y * SCALE; // Y inverted (up is positive)
+                    if (i === 0) ctx.moveTo(px, py);
+                    else ctx.lineTo(px, py);
+                }
+                ctx.stroke();
+                
+                // Path dots
+                ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--accent-blue');
+                for (let i = 0; i < pathHistory.length; i += 10) {
+                    const px = cx + pathHistory[i].x * SCALE;
+                    const py = cy - pathHistory[i].y * SCALE;
+                    ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
+                }
+            }
+            
+            // Current position - Robot body
+            const rx = cx + robotPos.x * SCALE;
+            const ry = cy - robotPos.y * SCALE;
+            const yawRad = robotPos.yaw * Math.PI / 180;
+            
+            // Robot triangle
+            ctx.save();
+            ctx.translate(rx, ry);
+            ctx.rotate(-yawRad); // Canvas Y is down, so invert rotation
+            
+            // Body
+            ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--accent-green');
+            ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue('--accent-green');
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(12, 0); // Front
+            ctx.lineTo(-8, 8); // Rear left
+            ctx.lineTo(-8, -8); // Rear right
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+            
+            // Direction indicator
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(12, 0); ctx.stroke();
+            
+            ctx.restore();
+            
+            // Position text
+            posValue.textContent = `X: ${robotPos.x.toFixed(2)}m Y: ${robotPos.y.toFixed(2)}m`;
+        }
+        
+        function updatePosition(data) {
+            // Utilise directement l'odométrie calculée par l'Arduino (plus précise)
+            if (data.px !== undefined && data.py !== undefined) {
+                robotPos.x = data.px;
+                robotPos.y = data.py;
+                robotPos.yaw = data.y || 0;
+                
+                // Ajouter au chemin
+                pathHistory.push({ x: robotPos.x, y: robotPos.y });
+                if (pathHistory.length > MAX_PATH_POINTS) {
+                    pathHistory.shift();
+                }
+                
+                drawTrajectory();
+            }
+        }
+        
+        btnResetPos.addEventListener('click', () => {
+            robotPos = { x: 0, y: 0, yaw: 0, speed: 0 };
+            pathHistory = [];
+            speedHistory = [];
+            // Reset Kalman filters
+            kfVx.reset();
+            kfVy.reset();
+            kfSpeed.reset();
+            lastTelemetryTime = null;
+            drawTrajectory();
+            posValue.textContent = 'X: 0.00m Y: 0.00m';
+            // Envoyer reset à l'Arduino
+            socket.emit('command', {t: 'reset_odom'});
+        });
+        
+        window.addEventListener('resize', resizeTrajCanvas);
+        resizeTrajCanvas();
+
+        // Direction controls
+        let autoDriveActive = false;
+        let autoDriveTimer = null;
+
+        document.getElementById('btn-auto-drive').addEventListener('click', () => {
+            autoDriveActive = !autoDriveActive;
+            const btn = document.getElementById('btn-auto-drive');
+            if (autoDriveActive) {
+                const distance = parseFloat(document.getElementById('val-distance').value) || 100;
+                const speed = parseFloat(document.getElementById('val-speed').value) || 50;
+                const duration = Math.round((distance / 30) * 1000 / (speed / 50));
+                btn.innerHTML = '<span class="btn-icon">⏹</span> Arrêter Auto';
+                btn.classList.add('active');
+                document.getElementById('auto-dot').classList.remove('warning');
+                document.getElementById('auto-dot').classList.add('');
+                document.getElementById('auto-dot').style.background = 'var(--accent-green)';
+                document.getElementById('auto-dot').style.boxShadow = '0 0 8px var(--accent-green)';
+                socket.emit('command', {t:'dir', x: 0, y: speed / 100});
+                updateConsole(`Auto: ${distance}cm à ${speed}% (${Math.round(duration/1000)}s)`, 'warning');
+                autoDriveTimer = setTimeout(() => {
+                    socket.emit('command', {t:'dir', x: 0, y: 0});
+                    autoDriveActive = false;
+                    btn.innerHTML = '<span class="btn-icon">🚀</span> Démarrer Auto';
+                    btn.classList.remove('active');
+                    updateConsole('Auto terminée.', '');
+                }, duration);
+            } else {
+                clearTimeout(autoDriveTimer);
+                socket.emit('command', {t:'dir', x: 0, y: 0});
+                btn.innerHTML = '<span class="btn-icon">🚀</span> Démarrer Auto';
+                btn.classList.remove('active');
+                document.getElementById('auto-dot').classList.add('warning');
+                document.getElementById('auto-dot').style.background = '';
+                document.getElementById('auto-dot').style.boxShadow = '';
+                updateConsole('Auto arrêtée.', '');
+            }
+        });
+        const manualSpeedEl  = document.getElementById('manual-speed');
+        const speedDisplayEl = document.getElementById('speed-display');
+        manualSpeedEl.addEventListener('input', () => {
+            speedDisplayEl.textContent = manualSpeedEl.value + '%';
+        });
+
+        const gripperSlider = document.getElementById('gripper-slider');
+        const gripperVal    = document.getElementById('gripper-val');
+        let gripperThrottle = null;
+        gripperSlider.addEventListener('input', () => {
+            const a = gripperSlider.value;
+            gripperVal.textContent = a + '°';
+            clearTimeout(gripperThrottle);
+            gripperThrottle = setTimeout(() => {
+                socket.emit('command', {t: 'grip', a: parseInt(a)});
+            }, 50);
+        });
+
+        function sendDirection() {
+            const spd = parseInt(manualSpeedEl.value) / 100;
+            const y = (ds.F ? spd : 0) + (ds.B ? -spd : 0);
+            const x = (ds.R ? spd : 0) + (ds.L ? -spd : 0);
+            console.log("sendDirection: x=" + x + ", y=" + y + ", ds=" + JSON.stringify(ds));
+            clearTimeout(jt); jt = setTimeout(() => { socket.emit('command', {t: 'dir', x, y}); }, 15);
+        }
+
+        const keys = { ArrowUp:'F', ArrowDown:'B', ArrowLeft:'L', ArrowRight:'R', Space:'S' };
+        window.addEventListener('keydown', e => {
+            if (keys[e.code] && !ds[keys[e.code]]) {
+                if(["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code)) e.preventDefault();
+                if (e.code === 'Space') { ds.F=ds.B=ds.L=ds.R=0; } else { ds[keys[e.code]] = 1; }
+                const btn = document.getElementById('btn-' + (keys[e.code] === 'F' ? 'up' : keys[e.code] === 'B' ? 'down' : keys[e.code] === 'L' ? 'left' : keys[e.code] === 'R' ? 'right' : 'stop'));
+                if (btn) btn.classList.add('pressed');
+                sendDirection();
+            }
+        });
+        window.addEventListener('keyup', e => {
+            if (keys[e.code] && e.code !== 'Space') {
+                ds[keys[e.code]] = 0;
+                const btn = document.getElementById('btn-' + (keys[e.code] === 'F' ? 'up' : keys[e.code] === 'B' ? 'down' : keys[e.code] === 'L' ? 'left' : keys[e.code] === 'R' ? 'right' : 'stop'));
+                if (btn) btn.classList.remove('pressed');
+                sendDirection();
+            }
+        });
+
+        const bindBtn = (id, dir) => {
+            const el = document.getElementById(id);
+            const press = (e) => { e.preventDefault(); if(dir === 'S') ds.F=ds.B=ds.L=ds.R=0; else ds[dir]=1; el.classList.add('pressed'); sendDirection(); };
+            const release = (e) => { e.preventDefault(); if(dir !== 'S') ds[dir]=0; el.classList.remove('pressed'); sendDirection(); };
+            el.addEventListener('mousedown', press); el.addEventListener('mouseup', release); el.addEventListener('mouseleave', release);
+            el.addEventListener('touchstart', press, {passive: false}); el.addEventListener('touchend', release, {passive: false});
+        };
+        bindBtn('btn-up', 'F'); bindBtn('btn-down', 'B'); bindBtn('btn-left', 'L'); bindBtn('btn-right', 'R'); bindBtn('btn-stop', 'S');
+
+        // ── Connection mode (USB / WiFi) ──
+        const btnWifi    = document.getElementById('btn-conn-wifi');
+        const btnUsb     = document.getElementById('btn-conn-usb');
+        const portSelect = document.getElementById('port-select');
+        let currentConnMode = 'wifi';
+
+        function applyConnMode(mode, port) {
+            currentConnMode = mode;
+            btnWifi.classList.toggle('active', mode === 'wifi');
+            btnUsb.classList.toggle('active',  mode === 'usb');
+            portSelect.style.display = mode === 'usb' ? 'inline-block' : 'none';
+        }
+
+        btnWifi.addEventListener('click', () => {
+            socket.emit('set_connection', { mode: 'wifi' });
+        });
+
+        btnUsb.addEventListener('click', () => {
+            socket.emit('scan_ports', {});
+            // connection will be established once user picks a port (or auto)
+            const chosen = portSelect.value;
+            socket.emit('set_connection', { mode: 'usb', port: chosen || null });
+        });
+
+        portSelect.addEventListener('change', () => {
+            if (currentConnMode === 'usb') {
+                socket.emit('set_connection', { mode: 'usb', port: portSelect.value });
+            }
+        });
+
+        socket.on('ports_list', (data) => {
+            portSelect.innerHTML = '';
+            data.ports.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.device;
+                opt.textContent = `${p.device} — ${p.desc}`;
+                portSelect.appendChild(opt);
+            });
+        });
+
+        socket.on('connection_status', (data) => {
+            applyConnMode(data.mode);
+            const label = data.mode === 'usb'
+                ? `USB ${data.port || ''}`
+                : 'WiFi';
+            updateConsole(
+                data.error ? `Connexion: ${data.error}` : `Mode: ${label}`,
+                data.error ? 'error' : ''
+            );
+        });
+
+        // Ask server for initial mode on connect
+        socket.on('connect', () => {
+            socket.emit('scan_ports', {});
+        });
+    </script>
+</body>
+</html>

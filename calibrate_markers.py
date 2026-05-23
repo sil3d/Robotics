@@ -53,8 +53,8 @@ DIST_COEFFS     = np.zeros((5, 1), dtype=np.float32)
 
 # Folders / files
 REFERENCE_DIR       = "reference_markers"
-REFERENCE_JSON      = "reference_markers.json"
-OUTPUT_JSON         = "marker_positions.json"
+REFERENCE_JSON      = os.path.join(os.path.dirname(__file__), "data", "reference_markers", "reference_markers.json")
+OUTPUT_JSON         = os.path.join(os.path.dirname(__file__), "data", "marker_positions", "marker_positions.json")
 OUTPUT_PATCHES      = "marker_patches"
 
 # Stabilisation

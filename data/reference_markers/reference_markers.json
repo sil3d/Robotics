@@ -1,0 +1,28 @@
+{
+  "markers": {
+    "1": {
+      "x_cm": 0,
+      "y_cm": 150,
+      "z_cm": 0,
+      "description": "Manufacturing station"
+    },
+    "2": {
+      "x_cm": 200,
+      "y_cm": 50,
+      "z_cm": 0,
+      "description": "Station A"
+    },
+    "3": {
+      "x_cm": 0,
+      "y_cm": 50,
+      "z_cm": 0,
+      "description": "Station B"
+    },
+    "4": {
+      "x_cm": 100,
+      "y_cm": 0,
+      "z_cm": 0,
+      "description": "Home"
+    }
+  }
+}
