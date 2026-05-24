@@ -41,8 +41,13 @@ python3 mission_engine.py
 ## Mission Cycle
 
 ```
-HOME(12) → Manufacture(3) → Station B(6)/A(9) → Manufacture(3) → Station A(9)/B(6) → HOME(12)
+SCAN → Manufacture(3) → Station B(6)=BLUE / Station A(9)=GREEN
+  → Manufacture(3) → Station A(9)=GREEN / Station B(6)=BLUE → HOME(12)
 ```
+
+**Arena**: 66×47cm | **Drop squares**: 15×15cm at Stations A & B  
+**Scan**: Robot goes to center (33, 23.5cm), rotates 360° at 0.25 rad/s  
+**Precision drop**: Positions in square center with 2cm accuracy before release
 
 2 cubes per cycle (blue + green), A* pathfinding between 12 AprilTag waypoints.
 
@@ -87,16 +92,21 @@ python test_smart_gripper.py
 |------|-------|
 | AprilTag dictionary | `cv2.aruco.DICT_4X4_250` |
 | Tag count | 12 markers |
-| Cube colors | Blue (cyan) + Green |
+| Arena dimensions | 66 cm × 47 cm |
+| Cube colors | Blue → Station B (tag 6), Green → Station A (tag 9) |
 | Pathfinding | A* (graphe complet) |
 | Localization | Camera + IMU + Optical Flow (SLAM) |
-| Camera backend (Windows) | `cv2.CAP_DSHOW` |
+| Camera backend | Windows: `CAP_DSHOW`, Linux: `CAP_V4L2` |
 | PID defaults | Kp=4.0 Ki=0.02 Kd=0.7 (in `data/robot_config.json`) |
 | Motor minPWM | 55 (both motors) |
 | Obstacle stop | 8 cm (unified: `STOP_DIST_CM` = `obstacle_threshold_near`) |
 | Navigation PID | Linear Kp=2.0 Ki=0.1 Kd=0.5 / Angular Kp=3.0 Ki=0.2 Kd=1.0 |
 | Max cmd_vel | linear=0.20 m/s, angular=1.50 rad/s |
-| Version | 8.0 |
+| Scan rotation | 0.25 rad/s (slow & smooth) |
+| Drop precision | 2 cm threshold in 15 cm square |
+| Gripper | 0° = open, 180° = closed |
+| 2D Map | `/map_feed` real-time visualization |
+| Version | 9.0 |
 
 ## Author
 

@@ -30,6 +30,7 @@
 // Configure micro-ROS transport to Serial (direct USB connection)
 #define MICROROS_SERIAL Serial
 #include <rcl/rcl.h>
+#include <rclc/rclc.h>      // Required for rclc types (rclc_executor_t, rclc_node_t)
 #include <rclc/executor.h>
 #include <rclc/node.h>
 #include <geometry_msgs/msg/accel.h>
@@ -136,6 +137,8 @@ float currentOutputL = 0, currentOutputR = 0;
 float currentTargetL = 0, currentTargetR = 0;
 
 // ─── MICRO-ROS ──────────────────────────────
+rcl_allocator_t allocator;
+rclc_support_t  support;
 rclc_executor_t executor;
 rclc_node_t     node;
 
@@ -581,9 +584,10 @@ void setup() {
 
   // ─── MICRO-ROS ─────────────────────────────────────────────
   set_microros_transports();
-  rclc_support_t support;
-  rclc_support_init(&support, 0, NULL, &executor);
-  rclc_node_init(&node, "esp32_robot", "", &support);
+  
+  allocator = rcl_get_default_allocator();
+  rclc_support_init(&support, 0, NULL, &allocator);
+  rclc_node_init_default(&node, "esp32_robot", "", &support);
 
   // Init messages
   geometry_msgs__msg__Accel__init(&imu_msg);
@@ -596,16 +600,16 @@ void setup() {
   std_msgs__msg__String__init(&cfg_cmd_msg);
 
   // Publishers
-  rclc_publisher_init_default(&imu_pub,    &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Accel), "/imu_data");
-  rclc_publisher_init_default(&us_pub,     &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/ultrasonic_data");
-  rclc_publisher_init_default(&odom_pub,   &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "/odom_data");
-  rclc_publisher_init_default(&result_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/cmd_result");
-  rclc_publisher_init_default(&health_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/sensor_health");
+  rclc_publisher_init_default(&imu_pub,    &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Accel),  "/imu_data");
+  rclc_publisher_init_best_effort(&us_pub,     &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,       msg, String), "/ultrasonic_data");
+  rclc_publisher_init_best_effort(&odom_pub,   &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point),   "/odom_data");
+  rclc_publisher_init_best_effort(&result_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,       msg, String), "/cmd_result");
+  rclc_publisher_init_best_effort(&health_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,       msg, String), "/sensor_health");
 
   // Subscribers
-  rclc_subscription_init_default(&vel_sub,     &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),  "/cmd_vel");
+  rclc_subscription_init_default(&vel_sub,      &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),  "/cmd_vel");
   rclc_subscription_init_default(&gripper_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/gripper_cmd");
-  rclc_subscription_init_default(&cfg_sub,     &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/robot_cfg");
+  rclc_subscription_init_default(&cfg_sub,      &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/robot_cfg");
 
   // Timers
   rclc_timer_init_default(&timer_imu,    &support, RCL_MS_TO_NS(IMU_INTERVAL),   publishIMU);

@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [9.0] — 2026-05-24
+
+### Added
+- **2D Map Visualization**: Real-time map at `/map_feed` with robot position, confirmed tags (green), unconfirmed (red/orange), scanning indicator (cyan)
+- **Arena dimensions in config**: `robot_config.json` now includes `arena` section with width (66cm), height (47cm), and zone positions
+- **Mission templates UI**: Quick buttons for 1/2/3/6 cubes or alternating color missions
+- **PRECISION_DROP state**: Robot positions precisely in 15cm drop square center (2cm threshold) before releasing
+- **Scan 360° improved**: Robot goes to arena center (33, 23.5cm) first, then rotates slowly at 0.25 rad/s for better tag detection
+- **Drop square navigation**: 15cm square positioning with slow approach speed (0.06 m/s)
+
+### Changed
+- **Station color mapping**: Fixed to Station A (tag 9) = GREEN, Station B (tag 6) = BLUE
+- **Camera backend**: Platform-specific detection — V4L2 on Linux, DirectShow on Windows
+- **Gripper angle**: Synced across all projects — 0° = open, 180° = closed
+- **TAG_MAP positions**: Updated with real arena measurements (66×47cm)
+- **Scan behavior**: Goes to center before rotating, slower speed (0.25 rad/s)
+
+### Fixed
+- **Color-to-station mapping**: All files now consistent — green→tag9, blue→tag6
+- **Platform compatibility**: `calibrate_camera.py` now works on both Windows (CAP_DSHOW) and Linux (CAP_V4L2)
+- **micro-ROS includes**: Added `#include <rclc/rclc.h>` for proper type definitions
+- **Map API endpoint**: `/api/map/update` receives real-time tag confirmation data from mission engine
+
 ## [8.0] — 2026-05-24
 
 ### Fixed (Production Audit)

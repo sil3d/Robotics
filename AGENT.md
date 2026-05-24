@@ -53,22 +53,28 @@ Robotics/
   - IMU yaw (orientation from BMI160)
 - **Units**: Tracker uses **cm**, mission_engine converts to **meters** (`/ 100.0`)
 
-### Tag Layout (12 markers)
-| Tag ID | Role | Position (cm) |
-|--------|------|---------------|
-| 12 | HOME | (0, 0) |
-| 3 | Manufacture (pickup) | (0, 70) |
-| 6 | Station B (blue drop) | (60, 55) |
-| 9 | Station A (green drop) | (-60, 30) |
-| 1,2 | North wall | left/right |
-| 4,7,11 | West wall | top → bottom |
-| 5,6,8,10 | East wall | top → bottom |
+### Tag Layout (12 markers) — Real Arena 66×47cm
+| Tag ID | Role | Position (cm) | Notes |
+|--------|------|---------------|-------|
+| 12 | HOME | (33, 5) | Center bottom |
+| 3 | Manufacture (pickup) | (33, 42) | Center top |
+| 6 | Station B | (51, 23) | **BLUE cubes** — Right middle |
+| 9 | Station A | (15, 16) | **GREEN cubes** — Left middle |
+| 1,2 | North wall | left/right | Wall markers |
+| 4,7,11 | West wall | top → bottom | Wall markers |
+| 5,8,10 | East wall | top → bottom | Wall markers |
+
+**Arena dimensions**: 66 cm width × 47 cm length
+**Drop squares**: 15 cm × 15 cm at Station A and B
 
 ### Mission Cycle
 ```
-SCAN_360 (SLAM) → NAVIGATE_WAYPOINT (A* → Manufacture)
+SCAN_360 (SLAM) → go to arena center (33, 23.5cm) → slow 360° rotation (0.25 rad/s)
+  → NAVIGATE_WAYPOINT (A* → Manufacture)
   → DETECT_CUBE (blue or green) → CLOSE_GRIPPER
-  → NAVIGATE_WAYPOINT (A* → Station B or A) → RELEASE
+  → NAVIGATE_WAYPOINT (A* → Station B=Blue or A=Green)
+  → PRECISION_DROP (position in 15cm square center, 2cm precision)
+  → RELEASE
   → NAVIGATE_WAYPOINT (A* → Manufacture) → [2nd cube]
   → NAVIGATE_WAYPOINT (A* → HOME) → RECORD → new cycle
 ```
@@ -81,7 +87,10 @@ SCAN_360 (SLAM) → NAVIGATE_WAYPOINT (A* → Manufacture)
 ## Rules for AI Agents
 
 1. **AprilTag dictionary**: ALWAYS use `cv2.aruco.DICT_4X4_250`. Never use `DICT_APRILTAG_36H11` or `DICT_4X4_50`.
-2. **Camera on Windows**: ALWAYS use `cv2.CAP_DSHOW` backend. Default backend blocks.
+2. **Camera backend (platform-specific)**: 
+   - Windows: `cv2.CAP_DSHOW` (DirectShow)
+   - Linux/Ubuntu: `cv2.CAP_V4L2` (Video4Linux2)
+   - Auto-detected via `sys.platform`
 3. **Colors**: There are TWO cube colors: **blue** (cyan) and **green**. Cyan IS blue.
 4. **Language**: Code comments in English. User communication in French.
 5. **Don't break imports**: `auto_detetc_tag_arduino.py` exports `ArduinoReader`, `AprilTagDetector`, `TagMapSLAM`, `RobotTracker`, `build_T_robot_cam`.
@@ -175,7 +184,11 @@ Read by `test_PID_auto/app.py` at startup. Written on Save. Read by `flask_ros_b
 
 ## Common Pitfalls
 
-- `cv2.CAP_DSHOW` doesn't appear in Pyright stubs — it's a false positive, works at runtime
+- `cv2.CAP_DSHOW` / `cv2.CAP_V4L2` don't appear in Pyright stubs — false positive, works at runtime
+- **PRECISION_DROP**: Robot positions precisely in 15cm drop square center (2cm threshold) before releasing cube
+- **2D Map Visualization**: Real-time `/map_feed` endpoint shows robot position, confirmed tags (green), unconfirmed (red), scanning indicator (cyan)
+- **Mission Templates**: Quick config buttons for 1/2/3/6 cubes or alternating colors
+- **Gripper logic**: 0° = open, 180° = closed (synced across all projects)
 - `build_T_robot_cam()` is called inside `RobotTracker.__init__()` — the import is needed transitively
 - `_step_scan()` calls `self.tag_map.tags.clear()` only if the map is empty — if tags are already known (prior map), they are preserved and merged
 - The tracker resets to (0,0) after scan — tag positions are relative to scan origin
