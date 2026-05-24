@@ -55,8 +55,8 @@ float MOTOR_A_MINPWM = 55;
 float MOTOR_B_MINPWM = 55;
 float speedMax = 255;
 float dirX = 0, dirY = 0;
-// Gripper: 180° = ouvert, 20° = fermé (saisie)
-int gripperAngle = 180;
+// Gripper: 180° = fermé, 0° = ouvert (inversé pour ton servo)
+int gripperAngle = 0;   // Position initiale: ouvert pour pick (0-180)
 
 // ── ODOMÉTRIE ──
 float posX = 0, posY = 0;
@@ -88,9 +88,9 @@ float lockedYaw = 0;
 // Profil S-curve: jerk limité pour pas déraper la bille
 float targetSpeedL = 0, targetSpeedR = 0;
 float currentSpeedL = 0, currentSpeedR = 0;
-float rampSpeed = 250.0;       // PWM/sec (montée) - réactif mais pas brutal
-float rampBrake = 350.0;       // PWM/sec (freinage, plus rapide)
-float rampNeutral = 200.0;     // PWM/sec (retour au neutre)
+float rampSpeed = 1200.0;       // PWM/sec (montée) - PLUS RAPIDE pour test
+float rampBrake = 800.0;       // PWM/sec (freinage)
+float rampNeutral = 600.0;     // PWM/sec (retour au neutre)
 
 // ─── VARIABLES IA GLOBALES ───
 float iaRampMultiplier = 1.0;   // Compatibilité EEPROM (plus utilisé)
@@ -139,9 +139,11 @@ void setMotorRaw(char m, int s) {
   else          { in1 = MB_IN3; in2 = MB_IN4; en = MB_EN; }
 
   int pwm = constrain(abs(s), 0, 255);
+  
   if (s > 0)      { digitalWrite(in1, LOW);  digitalWrite(in2, HIGH); }
   else if (s < 0) { digitalWrite(in1, HIGH); digitalWrite(in2, LOW);  }
   else            { digitalWrite(in1, LOW);  digitalWrite(in2, LOW);  }
+  
   ledcWrite(en, pwm);
 }
 
@@ -373,118 +375,32 @@ void updateOdometry() {
 }
 
 void updateMotors() {
-  // ── Vérrouillage cap ──
-  // Désactivé en marche arrière: la cinématique avec bille avant est différente
-  // et le PID yaw peut causer des oscillations en reculant
-  bool goingStraight = (fabs(dirY) > 0.1) && (fabs(dirX) < 0.3);
+  // SIMPLIFIÉ pour L298N: dirY = avance/recule (-1 à 1), dirX = rotation gauche/droite (-1 à 1)
+  // Rotation plus rapide: 255 au lieu de 127 max
+  float rotFactor = 1.0;  // Pleine vitesse en rotation
+  float left = (dirY + dirX * rotFactor) * 255.0;
+  float right = (dirY - dirX * rotFactor) * 255.0;
   
-  if (goingStraight && !yawLocked) {
-    lockedYaw = yaw;
-    yawLocked = true;
-    yawPID.SetMode(AUTOMATIC);
-    Serial.printf("[YAW] Verrouillage: %.2f°\n", lockedYaw);
-  }
-  if (!goingStraight && yawLocked) {
-    yawLocked = false;
-    yawPID.SetMode(MANUAL);
-    yawOutput = 0;
-    yawSetpoint = 0;
-    Serial.println("[YAW] Déverrouillage");
-  }
+  // Limite à -255..255
+  left = constrain(left, -255, 255);
+  right = constrain(right, -255, 255);
   
-  // ── PID Yaw (wrap-safe) ──
-  // On calcule l'erreur wrappée dans [-180,+180] et on passe l'erreur
-  // comme input autour d'un setpoint=0, évitant le saut ±360° lors du
-  // passage de la frontière ±180°.
-  if (yawLocked) {
-    float rawErr = lockedYaw - yaw;
-    while (rawErr >  180.0f) rawErr -= 360.0f;
-    while (rawErr < -180.0f) rawErr += 360.0f;
-    yawSetpoint = 0.0;
-    yawInput    = -rawErr;   // PID minimise (input - setpoint) = -rawErr → corr = +rawErr
-    yawPID.Compute();
+  // Zone morte: si commande très faible, arrêt complet
+  if (fabs(dirY) < 0.05 && fabs(dirX) < 0.05) { left = 0; right = 0; }
+  
+  // Debug
+  static unsigned long lastDbg = 0;
+  if (millis() - lastDbg > 500) {
+    Serial.printf("[MOTOR] Y=%.2f X=%.2f → L=%d R=%d\n", dirY, dirX, (int)left, (int)right);
+    lastDbg = millis();
   }
   
-  // ── Calcul base ──
-  float baseLeft = (dirY + dirX) * speedMax;
-  float baseRight = (dirY - dirX) * speedMax;
+  // A = moteur gauche, B = moteur droit
+  setMotorRaw('A', (int)left);
+  setMotorRaw('B', (int)right);
   
-  // ── Limite de vitesse ultrasons (ralentissement progressif) ──
-  // Appliquée en avant ET en arrière selon les capteurs actifs
-  if (usEnabled && fabs(dirY) > 0.1 && usSpeedLimit < 1.0) {
-    baseLeft *= usSpeedLimit;
-    baseRight *= usSpeedLimit;
-  }
-  
-  // ── Application PID Yaw ──
-  float maxPidInfluence = speedMax * 0.40;
-  float appliedPid = constrain(yawOutput, -maxPidInfluence, maxPidInfluence);
-  appliedPid = -appliedPid;
-  if (dirY < 0) appliedPid = -appliedPid;
-  
-  float targetL = yawLocked ? baseLeft - appliedPid : baseLeft;
-  float targetR = yawLocked ? baseRight + appliedPid : baseRight;
-  
-  // ── Corrections IA (trims uniquement, max ±8 PWM) ──
-  // En marche arrière, les trims sont inversés: la roue qui était trop lente
-  // en avant devient trop rapide en arrière → il faut compenser dans l'autre sens
-  float trimSign = (dirY >= 0) ? 1.0 : -1.0;
-  bool pureTurn = (fabs(dirY) < 0.05) && (fabs(dirX) > 0.05);  // rotation sur place
-  if (iaCorr.active && !pureTurn) {
-    targetL += iaCorr.trim_L * trimSign;
-    targetR += iaCorr.trim_R * trimSign;
-  }
-  
-  // ── Trims manuels ──
-  if (!pureTurn) {
-    targetL += MOTOR_A_TRIM * trimSign;
-    targetR += MOTOR_B_TRIM * trimSign;
-  }
-  
-  // ── RAMPE D'ACCÉLÉRATION ──
-  float effectiveRampSpeed = rampSpeed;
-  float effectiveRampBrake = rampBrake;
-  float effectiveRampNeutral = rampNeutral;
-  
-  if (iaCorr.active) {
-    // L'IA peut rendre la rampe plus douce ou plus rapide (±30% max)
-    float mult = 1.0 + iaCorr.ramp_boost;
-    mult = constrain(mult, 0.7, 1.3);
-    effectiveRampSpeed *= mult;
-    effectiveRampBrake *= mult;
-    effectiveRampNeutral *= mult;
-  }
-  
-  unsigned long now = millis();
-  static unsigned long lastRamp = 0;
-  float dt = (now - lastRamp) / 1000.0;
-  lastRamp = now;
-  if (dt <= 0 || dt > 0.1f) dt = 0.01f;
-  
-  currentSpeedL = applyRamp(currentSpeedL, targetL, effectiveRampSpeed, effectiveRampBrake, dt);
-  currentSpeedR = applyRamp(currentSpeedR, targetR, effectiveRampSpeed, effectiveRampBrake, dt);
-  
-  // ── Anti-calage ──
-  auto applyMinPWM = [](float val, float minPWM) -> float {
-    if (fabs(val) < 3.0) return 0;
-    if (val > 0 && val < minPWM) return minPWM;
-    if (val < 0 && val > -minPWM) return -minPWM;
-    return val;
-  };
-  
-  float outL = applyMinPWM(currentSpeedL, MOTOR_A_MINPWM);
-  float outR = applyMinPWM(currentSpeedR, MOTOR_B_MINPWM);
-  
-  outL = constrain(outL, -255, 255);
-  outR = constrain(outR, -255, 255);
-  
-  setMotorRaw(INVERSER_GAUCHE_DROITE ? 'B' : 'A', (int)outL);
-  setMotorRaw(INVERSER_GAUCHE_DROITE ? 'A' : 'B', (int)outR);
-  
-  currentOutputL = outL;
-  currentOutputR = outR;
-  currentTargetL = targetL;
-  currentTargetR = targetR;
+  currentOutputL = left;
+  currentOutputR = right;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -493,8 +409,10 @@ void updateMotors() {
 float getF(String &s, String k) { int i = s.indexOf(k); return i < 0 ? 0 : s.substring(i+k.length()).toFloat(); }
 
 void parseMessage(String &msg) {
+  Serial.printf("[RCV] %s\n", msg.c_str());
   if (msg.indexOf("\"t\":\"dir\"") >= 0) {
     dirX = getF(msg, "\"x\":"); dirY = getF(msg, "\"y\":");
+    Serial.printf("[DIR] x=%.2f y=%.2f\n", dirX, dirY);
   }
   else if (msg.indexOf("\"t\":\"cfg\"") >= 0) {
     if (msg.indexOf("\"ykp\":") >= 0) yawKp = getF(msg, "\"ykp\":");
@@ -550,9 +468,16 @@ void parseMessage(String &msg) {
   }
   else if (msg.indexOf("\"t\":\"save\"") >= 0) saveConfig();
   else if (msg.indexOf("\"t\":\"grip\"") >= 0) {
-    gripperAngle = (int)getF(msg, "\"a\":");
-    gripperAngle = constrain(gripperAngle, 20, 180);
-    gripper.write(gripperAngle);
+    int receivedAngle = (int)getF(msg, "\"a\":");
+    // Inversion: interface 180(ouvert)->0, interface 0(fermé)->180
+    gripperAngle = constrain(180 - receivedAngle, 0, 180);
+    Serial.printf("[GRIP] Received=%d -> Servo=%d\n", receivedAngle, gripperAngle);
+    if (gripper.attached()) {
+      gripper.write(gripperAngle);
+      Serial.printf("[GRIP] Servo written: %d\n", gripperAngle);
+    } else {
+      Serial.println("[GRIP] ERROR: Servo not attached!");
+    }
   }
   else if (msg.indexOf("\"t\":\"us\"") >= 0) {
     float enabled = getF(msg, "\"en\":");
@@ -588,19 +513,27 @@ void setup() {
 
   EEPROM.begin(EEPROM_SIZE);
   
-  pinMode(MA_IN1, OUTPUT); pinMode(MA_IN2, OUTPUT);
-  pinMode(MB_IN3, OUTPUT); pinMode(MB_IN4, OUTPUT);
-  ledcAttach(MA_EN, 30000, 8); ledcAttach(MB_EN, 30000, 8);
-  Serial.println("[OK] Moteurs");
-  
+  // Init GRIPPER d'abord (avant moteurs pour avoir assez de courant)
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
   gripper.setPeriodHertz(50);
   gripper.attach(SERVO_PIN, 500, 2400);
-  gripper.write(gripperAngle);  // Position initiale: ouvert (180°)
-  Serial.println("[OK] Gripper");
+  
+  // Calibration visible au démarrage - reste OUVERT pour pick & place
+  Serial.println("[GRIP] Calibration...");
+  delay(200);
+  gripper.write(180); Serial.println("[GRIP] -> 180 (fermé)"); delay(600);
+  gripper.write(0);   Serial.println("[GRIP] -> 0 (ouvert)"); delay(600);
+  
+  Serial.printf("[OK] Gripper prêt (position:%d - ouvert pour pick)\n", 0);
+  
+  // Init MOTEURS après le servo
+  pinMode(MA_IN1, OUTPUT); pinMode(MA_IN2, OUTPUT);
+  pinMode(MB_IN3, OUTPUT); pinMode(MB_IN4, OUTPUT);
+  ledcAttach(MA_EN, 1000, 8); ledcAttach(MB_EN, 1000, 8);  // 1kHz = bruit "moteur"
+  Serial.println("[OK] Moteurs");
 
   // Init ultrasons
   for (int i = 0; i < 4; i++) {
@@ -660,7 +593,7 @@ void loop() {
   }
 
   if (now - lastTelem >= 50) {
-    char m[380];
+    char m[512];  // Augmenté pour éviter overflow
     snprintf(m, sizeof(m),
              "{\"y\":%.2f,\"yr\":%.2f,\"p\":%.2f,\"ax\":%d,\"ay\":%d,\"az\":%d,\"tl\":%.0f,\"tr\":%.0f,\"ol\":%.0f,\"or\":%.0f,\"lk\":%d,\"ia\":%d,\"rs\":%.0f,\"us\":[%.1f,%.1f,%.1f,%.1f],\"usr\":[%d,%d,%d,%d],\"usm\":[%d,%d,%d,%d],\"use\":%d,\"usl\":%.2f,\"px\":%.3f,\"py\":%.3f}",
              currentYaw, currentYawRate, (float)yawOutput,
@@ -674,6 +607,8 @@ void loop() {
              usEnabled ? 1 : 0, usEnabled ? usSpeedLimit : 1.0,
              posX, posY);
     ws.textAll(m);
+    // Also send telemetry on Serial for USB mode
+    Serial.println(m);
     // Format IMU, pour auto_detetc_tag_arduino.py (attend: IMU,yaw,omega_z,ax,ay,az)
     Serial.printf("IMU,%.2f,%.4f,%d,%d,%d\n",
                   currentYaw, currentYawRate,

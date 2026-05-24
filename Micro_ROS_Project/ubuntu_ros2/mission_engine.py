@@ -89,9 +89,9 @@ NAV_LINEAR_SPEED    = 0.18   # m/s — vitesse navigation
 STOP_DIST_CM        = 8.0    # cm — distance arrêt obstacle (firmware gère < 3cm)
 STUCK_TIMEOUT_S     = 4.0    # s sans avancer = coincé
 
-# Gripper: 180° = ouvert, 20° = fermé (saisie)
-GRIPPER_OPEN  = 180
-GRIPPER_CLOSE = 20
+# Gripper: 0° = ouvert, 180° = fermé (sync avec test_PID_auto et firmware)
+GRIPPER_OPEN  = 0
+GRIPPER_CLOSE = 180
 # Distance min pour ouvrir sans écarter la box (cm)
 GRIPPER_SAFE_OPEN_DIST_CM = 15.0
 
@@ -731,8 +731,8 @@ class MissionEngine:
 
     def _step_open_gripper(self):
         self.send_velocity(0.0, 0.0)
-        # Ici on ouvre pour aller saisir (180° déjà ouvert → on s'assure juste)
-        # Pas de recul nécessaire : ouverture = bras déjà écartés (180°=ouvert)
+        # Ouvre le gripper pour aller saisir (0°=ouvert)
+        # Le robot démarre déjà ouvert, on s'assure juste
         self.send_gripper(GRIPPER_OPEN)
         self.log("Pince ouverte")
         self._detect_cube_start = None  # reset timeout détection
@@ -790,7 +790,7 @@ class MissionEngine:
     def _step_release(self):
         self.send_velocity(0.0, 0.0)
         # Reculer avant d'ouvrir si le robot est trop près de la box de dépôt
-        # (évite que les bras du gripper écartent la box en s'ouvrant)
+        # GRIPPER_OPEN = 0° (ouvert), évite que les bras écartent la box
         front_dist = self.us[0] if self.us[0] > 0 else 999.0
         if front_dist < GRIPPER_SAFE_OPEN_DIST_CM:
             self.log(f"Recul avant ouverture gripper (dist={front_dist:.1f}cm < {GRIPPER_SAFE_OPEN_DIST_CM}cm)")

@@ -83,8 +83,8 @@ float speedMax        = 255;
 // dirY : -1=arrière, 0=stop, 1=avant
 // dirX : -1=gauche,  0=droit, 1=droite
 float dirX = 0, dirY = 0;
-// Gripper: 180° = ouvert, 20° = fermé (saisie)
-int   gripperAngle = 180;
+// Gripper: 180° = fermé, 0° = ouvert (sync avec test_PID_auto)
+int   gripperAngle = 0;   // Position initiale: ouvert
 
 // ─── ODOMÉTRIE ──────────────────────────────
 float posX = 0, posY = 0;
@@ -479,16 +479,18 @@ void cmdVelCallback(const void* msg_in) {
 void gripperCallback(const void* msg_in) {
   const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msg_in;
   if (!msg->data.data) return;
-  // Accepte angle numérique "90" ou o/O (open) / c/C (close)
+  // Accepte angle numérique "0-180" ou o/O (open) / c/C (close)
+  // Sync avec test_PID_auto: 0=ouvert, 180=fermé
   char c = msg->data.data[0];
   if (c >= '0' && c <= '9') {
-    gripperAngle = atoi(msg->data.data);
+    int received = atoi(msg->data.data);
+    // Inversion: interface 180(ouvert)->0, interface 0(fermé)->180
+    gripperAngle = constrain(180 - received, 0, 180);
   } else if (c == 'o' || c == 'O') {
-    gripperAngle = 180;   // open
+    gripperAngle = 0;     // ouvert
   } else if (c == 'c' || c == 'C') {
-    gripperAngle = 20;    // close
+    gripperAngle = 180;   // fermé
   }
-  gripperAngle = constrain(gripperAngle, 20, 180);
   gripper.write(gripperAngle);
   snprintf(result_buf, sizeof(result_buf), "gripper=%d", gripperAngle);
   result_msg.data.data = result_buf;
@@ -551,7 +553,7 @@ void setup() {
   ESP32PWM::allocateTimer(3);
   gripper.setPeriodHertz(50);
   gripper.attach(SERVO_PIN, 500, 2400);
-  gripper.write(gripperAngle);  // Position initiale: ouvert (180°)
+  gripper.write(gripperAngle);  // Position initiale: ouvert (0°)
 
   // Ultrasons
   for (int i = 0; i < 4; i++) {

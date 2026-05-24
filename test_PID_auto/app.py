@@ -109,14 +109,13 @@ def connect_serial(port=None):
         return False
     if not port:
         ports = serial.tools.list_ports.comports()
-        if len(ports) == 1:
-            port = ports[0].device
-        elif len(ports) == 0:
+        if len(ports) == 0:
             logger.warning("[USB] No serial port found")
             return False
         else:
-            logger.warning("[USB] Multiple ports found")
-            return False
+            # Prend le premier port disponible (généralement le ESP32)
+            port = ports[0].device
+            logger.info(f"[USB] Auto-selecting port: {port} (from {len(ports)} available)")
     try:
         with _serial_lock:
             if serial_conn and serial_conn.is_open:
@@ -157,7 +156,6 @@ def _push_telemetry(data: dict):
             global us_sensor_mask
             us_sensor_mask = [bool(v) for v in us_mask[:4]]
     socketio.emit('telemetry', data)
-
 
 def _emit_us_status():
     socketio.emit('us_status', {
@@ -234,6 +232,9 @@ def serial_listener():
                 data = json.loads(line)
                 if 'y' in data:
                     _push_telemetry(data)
+            elif line.startswith('[RCV]') or line.startswith('[DIR]') or line.startswith('[US]') or line.startswith('[START]') or line.startswith('[MOTOR]') or line.startswith('[GRIP]'):
+                # Log Arduino debug messages
+                logger.info(f"[ARDUINO] {line}")
         except Exception as e:
             logger.warning("USB error: %s", e)
 
@@ -303,13 +304,19 @@ def send_to_esp32(data):
         if connection_mode == 'usb':
             with _serial_lock:
                 conn = serial_conn
-            if conn and conn.is_open:
+                conn_open = conn and conn.is_open
+            if conn_open:
+                logger.info(f"  [USB] Writing to serial: {payload}")
                 conn.write((payload + '\n').encode('utf-8'))
                 return
+            else:
+                logger.warning(f"  [USB] Serial not open, conn={conn}, is_open={conn.is_open if conn else False}")
         with _ws_lock:
             if robot_ws and robot_ws.sock and robot_ws.sock.connected:
+                logger.info(f"  [WIFI] Using existing WebSocket")
                 robot_ws.send(payload)
             else:
+                logger.info(f"  [WIFI] Creating new WebSocket connection to {WS_URL}")
                 ws = create_connection(WS_URL, timeout=2.0)
                 ws.send(payload)
                 ws.close()
@@ -324,6 +331,7 @@ def index():
 @socketio.on('command')
 def handle_command(data):
     global current_dir_x, current_dir_y
+    logger.info(f"[COMMAND] Received: {data}, connection_mode={connection_mode}, serial={'open' if serial_conn and serial_conn.is_open else 'closed'}")
     send_to_esp32(data)
     current_dir_x = data.get('x', 0.0)
     current_dir_y = data.get('y', 0.0)
@@ -424,8 +432,10 @@ def handle_reset_ia(_):
 @socketio.on('set_connection')
 def handle_set_connection(data):
     mode = data.get('mode', 'wifi')
+    port = data.get('port')
+    logger.info(f"[CONN] Switching to {mode}, port={port}, current_mode={connection_mode}")
     if mode == 'usb':
-        if not connect_serial(data.get('port')):
+        if not connect_serial(port):
             socketio.emit('connection_status', {'mode': connection_mode, 'error': 'USB not found'})
     else:
         switch_to_wifi()

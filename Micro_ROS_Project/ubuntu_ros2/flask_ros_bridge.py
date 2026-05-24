@@ -177,7 +177,8 @@ class RobotRosBridge(Node):
         self.cfg_pub.publish(msg)
 
     def send_gripper(self, value):
-        """Envoie commande gripper (angle int ou 'o'/'c') au topic /gripper_cmd"""
+        """Envoie commande gripper (angle 0-180 ou 'o'/'c') au topic /gripper_cmd
+        Sync avec test_PID_auto: 0=ouvert, 180=fermé"""
         msg = String()
         msg.data = str(value)
         self.grip_pub.publish(msg)
