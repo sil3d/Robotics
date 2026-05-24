@@ -128,6 +128,7 @@ UltrasonicSensor usSensors[4] = {
   {US4_TRIG, US4_ECHO, 0, false, 0}
 };
 bool  usEnabled    = true;
+bool  usMask[4]    = {true, true, true, true};
 float usSpeedLimit = 1.0f;
 
 // ─── TÉLÉMÉTRIE ─────────────────────────────
@@ -143,7 +144,7 @@ rcl_subscription_t  vel_sub, gripper_sub, cfg_sub;
 
 geometry_msgs__msg__Accel  imu_msg;
 std_msgs__msg__String      us_msg;
-char us_buf[64];
+char us_buf[80];
 geometry_msgs__msg__Point  odom_msg;
 std_msgs__msg__String      result_msg;
 std_msgs__msg__String      health_msg;
@@ -282,6 +283,14 @@ void updateUltrasonics() {
   if (now - lastRead < US_INTERVAL) return;
   lastRead = now;
 
+  if (!usMask[curSensor]) {
+    usSensors[curSensor].distance = -1.0f;
+    usSensors[curSensor].responding = false;
+    usSensors[curSensor].lastUpdate = now;
+    curSensor = (curSensor + 1) % 4;
+    return;
+  }
+
   UltrasonicSensor& us = usSensors[curSensor];
   float dist = readUltrasonic(us.trigPin, us.echoPin);
   if (dist >= 0) { us.distance = dist; us.responding = true; us.lastUpdate = now; }
@@ -418,24 +427,26 @@ void publishIMU(rcl_timer_t*, int64_t) {
 
 void publishUS(rcl_timer_t*, int64_t) {
   // US1=avant droit, US2=avant gauche, US3=arrière gauche, US4=arrière droite
-  snprintf(us_buf, sizeof(us_buf), "{\"us\":[%.1f,%.1f,%.1f,%.1f]}",
+  snprintf(us_buf, sizeof(us_buf), "{\"us\":[%.1f,%.1f,%.1f,%.1f],\"usm\":[%d,%d,%d,%d]}",
     usSensors[0].distance, usSensors[1].distance,
-    usSensors[2].distance, usSensors[3].distance);
+    usSensors[2].distance, usSensors[3].distance,
+    usMask[0] ? 1 : 0, usMask[1] ? 1 : 0, usMask[2] ? 1 : 0, usMask[3] ? 1 : 0);
   us_msg.data.data = us_buf;
   us_msg.data.size = strlen(us_buf);
   rcl_publish(&us_pub, &us_msg, NULL);
 }
 
 void publishHealth(rcl_timer_t*, int64_t) {
-  char health[300];
+  char health[320];
   snprintf(health, sizeof(health),
-    "{\"imu\":%d,\"us\":[%.1f,%.1f,%.1f,%.1f],\"usr\":[%d,%d,%d,%d],"
+    "{\"imu\":%d,\"us\":[%.1f,%.1f,%.1f,%.1f],\"usr\":[%d,%d,%d,%d],\"usm\":[%d,%d,%d,%d],"
     "\"usl\":%.2f,\"px\":%.3f,\"py\":%.3f,\"lk\":%d,\"yaw\":%.2f}",
     imuReady ? 1 : 0,
     usSensors[0].distance, usSensors[1].distance,
     usSensors[2].distance, usSensors[3].distance,
     usSensors[0].responding ? 1 : 0, usSensors[1].responding ? 1 : 0,
     usSensors[2].responding ? 1 : 0, usSensors[3].responding ? 1 : 0,
+    usMask[0] ? 1 : 0, usMask[1] ? 1 : 0, usMask[2] ? 1 : 0, usMask[3] ? 1 : 0,
     usSpeedLimit, posX, posY, yawLocked ? 1 : 0, yaw);
   health_msg.data.data = health;
   health_msg.data.size = strlen(health);
@@ -508,6 +519,10 @@ void cfgCallback(const void* msg_in) {
   if (strstr(s, "\"save\":1"))       saveConfig();
   if (strstr(s, "\"us_en\":0"))      usEnabled = false;
   if (strstr(s, "\"us_en\":1"))      usEnabled = true;
+  if (strstr(s, "\"us0\":")) usMask[0] = getJsonFloat(s, "\"us0\":") > 0.5f;
+  if (strstr(s, "\"us1\":")) usMask[1] = getJsonFloat(s, "\"us1\":") > 0.5f;
+  if (strstr(s, "\"us2\":")) usMask[2] = getJsonFloat(s, "\"us2\":") > 0.5f;
+  if (strstr(s, "\"us3\":")) usMask[3] = getJsonFloat(s, "\"us3\":") > 0.5f;
 
   Serial.printf("[CFG] PID:%.1f,%.2f,%.1f | Trims:%.0f,%.0f | MinPWM:%.0f,%.0f\n",
                 yawKp, yawKi, yawKd, MOTOR_A_TRIM, MOTOR_B_TRIM,

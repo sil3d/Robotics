@@ -782,6 +782,34 @@
             grid-template-columns: repeat(2, 1fr);
             gap: 8px;
         }
+        .us-sensor-controls {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 6px;
+            margin-top: 8px;
+        }
+        .us-sensor-toggle {
+            padding: 6px 4px;
+            border: 1px solid var(--border-default);
+            border-radius: 8px;
+            background: var(--bg-elevated);
+            color: var(--text-muted);
+            font-size: 10px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .us-sensor-toggle.active {
+            background: rgba(63,185,80,0.18);
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+        }
+        .us-sensor-toggle.off {
+            background: rgba(248,81,73,0.12);
+            border-color: rgba(248,81,73,0.5);
+            color: #ff8f8f;
+            opacity: 0.9;
+        }
         .us-sensor {
             display: flex;
             align-items: center;
@@ -1005,6 +1033,12 @@
                     </div>
                 </div>
             </div>
+            <div class="us-sensor-controls" id="us-sensor-controls">
+                <button class="us-sensor-toggle active" data-us-idx="0">US1</button>
+                <button class="us-sensor-toggle active" data-us-idx="1">US2</button>
+                <button class="us-sensor-toggle active" data-us-idx="2">US3</button>
+                <button class="us-sensor-toggle active" data-us-idx="3">US4</button>
+            </div>
             <div class="us-stop-alert" id="us-stop-alert">🐌 RALENTI - VITESSE LIMITÉE</div>
         </div>
 
@@ -1146,7 +1180,6 @@
         socket.on('connect_error', (err) => {
             console.log('[SOCKET] Connection error:', err.message);
         });
-        socket.on('telemetry', (data) => { /* handled below */ });
 
         // Chart setup with enhanced styling
         const chartOptions = {
@@ -1250,8 +1283,23 @@
             document.getElementById('us3-val'),
             document.getElementById('us4-val')
         ];
+        const usSensorButtons = Array.from(document.querySelectorAll('.us-sensor-toggle'));
         const usStopAlert = document.getElementById('us-stop-alert');
         let usEnabled = true;
+        let usSensorMask = [true, true, true, true];
+
+        function syncUsSensorButtons() {
+            usSensorButtons.forEach((btn, idx) => {
+                const enabled = usSensorMask[idx];
+                btn.classList.toggle('active', enabled);
+                btn.classList.toggle('off', !enabled);
+                btn.textContent = 'US' + (idx + 1) + (enabled ? ' ON' : ' OFF');
+            });
+        }
+
+        function sendUsMask() {
+            socket.emit('toggle_us_sensor', { mask: usSensorMask, enabled: usEnabled });
+        }
 
         usToggle.addEventListener('click', () => {
             usEnabled = !usEnabled;
@@ -1259,9 +1307,24 @@
             socket.emit('toggle_us', { enabled: usEnabled });
         });
 
+        usSensorButtons.forEach((btn) => {
+            btn.addEventListener('click', () => {
+                const idx = parseInt(btn.dataset.usIdx, 10);
+                usSensorMask[idx] = !usSensorMask[idx];
+                syncUsSensorButtons();
+                sendUsMask();
+            });
+        });
+
         socket.on('us_status', (data) => {
-            usEnabled = data.enabled;
-            usToggle.classList.toggle('active', usEnabled);
+            if (data.enabled !== undefined) {
+                usEnabled = data.enabled;
+                usToggle.classList.toggle('active', usEnabled);
+            }
+            if (Array.isArray(data.mask) && data.mask.length >= 4) {
+                usSensorMask = data.mask.map(v => Boolean(v));
+                syncUsSensorButtons();
+            }
         });
 
         function updateUltrasons(data) {
@@ -1271,6 +1334,12 @@
             if (data.use !== undefined) {
                 usEnabled = data.use === 1;
                 usToggle.classList.toggle('active', usEnabled);
+            }
+
+            // Sync per-sensor mask from telemetry
+            if (Array.isArray(data.usm) && data.usm.length >= 4) {
+                usSensorMask = data.usm.map(v => Boolean(v));
+                syncUsSensorButtons();
             }
             
             // Check for speed limit from telemetry
@@ -1283,12 +1352,15 @@
             for (let i = 0; i < 4; i++) {
                 const distance = data.us[i];
                 const responding = data.usr[i] === 1;
+                const sensorEnabled = usSensorMask[i] !== false;
                 
                 // Update indicator (green = responding, red = not responding)
-                usIndicators[i].classList.toggle('ok', responding);
+                usIndicators[i].classList.toggle('ok', responding && sensorEnabled);
                 
                 // Update value
-                if (responding && distance > 0) {
+                if (!sensorEnabled) {
+                    usValues[i].textContent = 'OFF';
+                } else if (responding && distance > 0) {
                     usValues[i].textContent = distance.toFixed(1) + ' cm';
                 } else {
                     usValues[i].textContent = '-- cm';

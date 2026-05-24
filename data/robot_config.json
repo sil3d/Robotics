@@ -1,9 +1,9 @@
 {
-  "_comment": "Source de vérité globale. Partagée par test_PID_auto et micro-ROS. Ne pas éditer à la main pendant que le robot tourne.",
+  "_comment": "Source de v\u00e9rit\u00e9 globale. Partag\u00e9e par test_PID_auto et micro-ROS. Ne pas \u00e9diter \u00e0 la main pendant que le robot tourne.",
   "pid": {
-    "kp": 4.0,
-    "ki": 0.02,
-    "kd": 0.7
+    "kp": 4,
+    "ki": 0.08,
+    "kd": 0.6
   },
   "trims": {
     "a": 0.0,
@@ -14,26 +14,26 @@
     "b": 55.0
   },
   "ramp": {
-    "speed":   80.0,
-    "brake":  120.0,
+    "speed": 80.0,
+    "brake": 120.0,
     "neutral": 200.0
   },
   "ia_trims": {
-    "L":     0.0,
-    "R":     0.0,
+    "L": 0.0,
+    "R": 0.0,
     "boost": 0.0
   },
   "navigation": {
-    "_comment": "Paramètres navigation_node (ROS2). obstacle_threshold_near aligné sur STOP_DIST_CM=8cm de mission_engine.",
-    "max_linear_speed":        0.20,
-    "max_angular_speed":       1.50,
-    "pid_linear_kp":           2.0,
-    "pid_linear_ki":           0.1,
-    "pid_linear_kd":           0.5,
-    "pid_angular_kp":          3.0,
-    "pid_angular_ki":          0.2,
-    "pid_angular_kd":          1.0,
+    "_comment": "Param\u00e8tres navigation_node (ROS2). obstacle_threshold_near align\u00e9 sur STOP_DIST_CM=8cm de mission_engine.",
+    "max_linear_speed": 0.2,
+    "max_angular_speed": 1.5,
+    "pid_linear_kp": 2.0,
+    "pid_linear_ki": 0.1,
+    "pid_linear_kd": 0.5,
+    "pid_angular_kp": 3.0,
+    "pid_angular_ki": 0.2,
+    "pid_angular_kd": 1.0,
     "obstacle_threshold_near": 0.08,
-    "obstacle_threshold_far":  0.15
+    "obstacle_threshold_far": 0.15
   }
 }

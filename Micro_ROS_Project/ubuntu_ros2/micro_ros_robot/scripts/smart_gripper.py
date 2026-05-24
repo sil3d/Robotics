@@ -11,7 +11,7 @@
    - Reports gripper state (empty, has_box, failed)
 
  Subscribes to:
-   - /ultrasonic_data (geometry_msgs/Point) - front, back, left, right distances
+   - /ultrasonic_data (std_msgs/String) - JSON: {"us":[front, back, left, right]}
    - /gripper_feedback (std_msgs/Float32) - actual gripper position (0-90 degrees)
 
  Publishes to:
@@ -31,7 +31,6 @@
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point
 from std_msgs.msg import String, Float32
 from std_srvs.srv import Empty
 import time
@@ -113,7 +112,7 @@ class SmartGripperController(Node):
 
         # --- Subscribers ---
         self.ultrasonic_sub = self.create_subscription(
-            Point, '/ultrasonic_data', self._ultrasonic_callback, 10)
+            String, '/ultrasonic_data', self._ultrasonic_callback, 10)
         self.gripper_feedback_sub = self.create_subscription(
             Float32, '/gripper_feedback', self._gripper_feedback_callback, 10)
 
@@ -134,20 +133,23 @@ class SmartGripperController(Node):
     # Ultrasonic & Feedback Callbacks
     # =========================================================================
 
-    def _ultrasonic_callback(self, msg: Point):
+    def _ultrasonic_callback(self, msg: String):
         """Handle ultrasonic data from ESP32.
 
-        Point.x = front distance (cm)
-        Point.y = back distance (cm)
-        Point.z = left distance (cm)
-        Point.w = right distance (cm)
-        -1 or negative = no reading / error
+        Expected JSON: {"us": [front, back, left, right]}
+        Distances are in cm; negative/absent values mean invalid reading.
         """
-        self.ultrasonic_front = msg.x
-        self.ultrasonic_back = msg.y
-        self.ultrasonic_left = msg.z
-        self.ultrasonic_right = msg.w
-        self._ultrasonic_last_update = time.time()
+        try:
+            data = json.loads(msg.data)
+            us = data.get('us', [])
+            if len(us) >= 4:
+                self.ultrasonic_front = float(us[0])
+                self.ultrasonic_back = float(us[1])
+                self.ultrasonic_left = float(us[2])
+                self.ultrasonic_right = float(us[3])
+                self._ultrasonic_last_update = time.time()
+        except Exception:
+            pass
 
     def _gripper_feedback_callback(self, msg: Float32):
         """Handle gripper position feedback from ESP32.

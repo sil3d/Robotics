@@ -112,6 +112,7 @@ UltrasonicSensor usSensors[4] = {
 const uint8_t NUM_US_SENSORS = sizeof(usSensors) / sizeof(usSensors[0]);
 const float SOUND_SPEED = 0.0343;
 bool usEnabled = true;  // Activation/désactivation globale
+bool usMask[4] = {true, true, true, true};
 float usSpeedLimit = 1.0;  // 1.0 = pleine vitesse, 0.0 = arrêt
 
 // ─── CORRECTIONS IA ───
@@ -248,92 +249,79 @@ void updateIMU() {
 // ═══════════════════════════════════════════════════════════════
 // ULTRASONS — Lecture des 4 capteurs
 // ═══════════════════════════════════════════════════════════════
-// Machine à états non-bloquante pour les ultrasons
-// Chaque appel avance d'une étape — aucun delay()
-// Cycle complet : 4 capteurs × ~60ms = ~240ms
-enum class UsState : uint8_t { IDLE, TRIG, WAIT_ECHO, READ };
+// Un capteur lu par appel (60ms entre chaque), cycle complet ~240ms
+
+float readDistance(uint8_t idx) {
+  uint8_t trig = usSensors[idx].trigPin;
+  uint8_t echo = usSensors[idx].echoPin;
+  digitalWrite(trig, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trig, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trig, LOW);
+  long duration = pulseIn(echo, HIGH, 30000);
+  if (duration == 0) return -1.0;
+  return (duration * SOUND_SPEED) / 2.0;
+}
 
 void updateUltrasonics() {
   if (!usEnabled) { usSpeedLimit = 1.0; return; }
 
-  static UsState       state       = UsState::IDLE;
-  static uint8_t       idx         = 0;
-  static unsigned long stateStart  = 0;
-  static bool          wasLimited  = false;
+  static uint8_t       idx        = 0;
+  static unsigned long lastRead   = 0;
+  static bool          wasLimited = false;
 
   unsigned long now = millis();
+  if (now - lastRead < 60) return;
+  lastRead = now;
 
-  switch (state) {
-
-    case UsState::IDLE:
-      // Attendre 50ms avant de démarrer le prochain capteur (anti-interférence echo)
-      if (now - stateStart < 50) return;
-      idx = (idx + 1) % NUM_US_SENSORS;
-      // Envoyer l'impulsion TRIG
-      digitalWrite(usSensors[idx].trigPin, LOW);
-      delayMicroseconds(2);
-      digitalWrite(usSensors[idx].trigPin, HIGH);
-      delayMicroseconds(10);
-      digitalWrite(usSensors[idx].trigPin, LOW);
-      stateStart = now;
-      state = UsState::WAIT_ECHO;
-      break;
-
-    case UsState::WAIT_ECHO: {
-      // Lire l'écho de façon non-bloquante via pulseIn avec timeout minimal
-      // pulseIn est ici acceptable car son timeout = 30ms max et c'est le seul appel bloquant
-      // → on l'isole dans cet état pour que les autres états (IMU, moteurs) ne soient pas affectés
-      long duration = pulseIn(usSensors[idx].echoPin, HIGH, 30000);
-      if (duration > 0) {
-        float dist = (duration * SOUND_SPEED) / 2.0;
-        if (dist <= US_MAX_DISTANCE) {
-          usSensors[idx].distance   = dist;
-          usSensors[idx].responding = true;
-          usSensors[idx].lastUpdate = now;
-        }
-      } else {
-        // Pas de réponse
-        if (now - usSensors[idx].lastUpdate > 1000) usSensors[idx].responding = false;
-      }
-      stateStart = now;
-      state = UsState::IDLE;
-
-      // Recalculer usSpeedLimit après chaque capteur lu
-      bool isMovingForward  = (dirY >  0.1);
-      bool isMovingBackward = (dirY < -0.1);
-
-      if (!isMovingForward && !isMovingBackward) { usSpeedLimit = 1.0; break; }
-
-      int startIdx = isMovingForward ? 0 : 2;
-      int endIdx   = isMovingForward ? 2 : 4;
-
-      float minDist   = 999.0;
-      bool  hasActive = false;
-      for (int i = startIdx; i < endIdx; i++) {
-        if (usSensors[i].responding && usSensors[i].distance > 0) {
-          if (usSensors[i].distance < minDist) minDist = usSensors[i].distance;
-          hasActive = true;
-        }
-      }
-
-      if (!hasActive) { usSpeedLimit = 1.0; break; }
-
-      if      (minDist < 3.0)  usSpeedLimit = 0.05;
-      else if (minDist < 15.0) usSpeedLimit = 0.05 + (minDist - 3.0) / 12.0 * 0.95;
-      else                     usSpeedLimit = 1.0;
-
-      bool isLimited = (usSpeedLimit < 0.95);
-      if (isLimited && !wasLimited)
-        Serial.printf("[US] Obstacle %s à %.1f cm → %d%%\n",
-                      isMovingForward ? "devant" : "derrière", minDist, (int)(usSpeedLimit * 100));
-      else if (!isLimited && wasLimited)
-        Serial.println("[US] Zone libre");
-      wasLimited = isLimited;
-      break;
-    }
-
-    default: state = UsState::IDLE; break;
+  if (!usMask[idx]) {
+    usSensors[idx].distance = -1.0;
+    usSensors[idx].responding = false;
+    usSensors[idx].lastUpdate = now;
+    idx = (idx + 1) % NUM_US_SENSORS;
+    return;
   }
+
+  float dist = readDistance(idx);
+  if (dist > 0 && dist <= US_MAX_DISTANCE) {
+    usSensors[idx].distance   = dist;
+    usSensors[idx].responding = true;
+    usSensors[idx].lastUpdate = now;
+  } else {
+    if (now - usSensors[idx].lastUpdate > 1000) usSensors[idx].responding = false;
+  }
+
+  idx = (idx + 1) % NUM_US_SENSORS;
+
+  // Recalculer usSpeedLimit
+  bool isMovingForward  = (dirY >  0.1);
+  bool isMovingBackward = (dirY < -0.1);
+  if (!isMovingForward && !isMovingBackward) { usSpeedLimit = 1.0; return; }
+
+  int startIdx = isMovingForward ? 0 : 2;
+  int endIdx   = isMovingForward ? 2 : 4;
+  float minDist = 999.0;
+  bool  hasActive = false;
+  for (int i = startIdx; i < endIdx; i++) {
+    if (usSensors[i].responding && usSensors[i].distance > 0) {
+      if (usSensors[i].distance < minDist) minDist = usSensors[i].distance;
+      hasActive = true;
+    }
+  }
+  if (!hasActive) { usSpeedLimit = 1.0; return; }
+
+  if      (minDist < 3.0)  usSpeedLimit = 0.05;
+  else if (minDist < 15.0) usSpeedLimit = 0.05 + (minDist - 3.0) / 12.0 * 0.95;
+  else                     usSpeedLimit = 1.0;
+
+  bool isLimited = (usSpeedLimit < 0.95);
+  if (isLimited && !wasLimited)
+    Serial.printf("[US] Obstacle %s a %.1f cm -> %d%%\n",
+                  isMovingForward ? "devant" : "derriere", minDist, (int)(usSpeedLimit * 100));
+  else if (!isLimited && wasLimited)
+    Serial.println("[US] Zone libre");
+  wasLimited = isLimited;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -388,7 +376,7 @@ void updateMotors() {
   // ── Vérrouillage cap ──
   // Désactivé en marche arrière: la cinématique avec bille avant est différente
   // et le PID yaw peut causer des oscillations en reculant
-  bool goingStraight = (fabs(dirY) > 0.1) && (fabs(dirX) < 0.3) && (dirY > 0);
+  bool goingStraight = (fabs(dirY) > 0.1) && (fabs(dirX) < 0.3);
   
   if (goingStraight && !yawLocked) {
     lockedYaw = yaw;
@@ -441,14 +429,17 @@ void updateMotors() {
   // En marche arrière, les trims sont inversés: la roue qui était trop lente
   // en avant devient trop rapide en arrière → il faut compenser dans l'autre sens
   float trimSign = (dirY >= 0) ? 1.0 : -1.0;
-  if (iaCorr.active) {
+  bool pureTurn = (fabs(dirY) < 0.05) && (fabs(dirX) > 0.05);  // rotation sur place
+  if (iaCorr.active && !pureTurn) {
     targetL += iaCorr.trim_L * trimSign;
     targetR += iaCorr.trim_R * trimSign;
   }
   
   // ── Trims manuels ──
-  targetL += MOTOR_A_TRIM * trimSign;
-  targetR += MOTOR_B_TRIM * trimSign;
+  if (!pureTurn) {
+    targetL += MOTOR_A_TRIM * trimSign;
+    targetR += MOTOR_B_TRIM * trimSign;
+  }
   
   // ── RAMPE D'ACCÉLÉRATION ──
   float effectiveRampSpeed = rampSpeed;
@@ -566,6 +557,10 @@ void parseMessage(String &msg) {
   else if (msg.indexOf("\"t\":\"us\"") >= 0) {
     float enabled = getF(msg, "\"en\":");
     usEnabled = (enabled > 0);
+    if (msg.indexOf("\"us0\":") >= 0) usMask[0] = getF(msg, "\"us0\":") > 0.5;
+    if (msg.indexOf("\"us1\":") >= 0) usMask[1] = getF(msg, "\"us1\":") > 0.5;
+    if (msg.indexOf("\"us2\":") >= 0) usMask[2] = getF(msg, "\"us2\":") > 0.5;
+    if (msg.indexOf("\"us3\":") >= 0) usMask[3] = getF(msg, "\"us3\":") > 0.5;
     Serial.printf("[US] Capteurs %s\n", usEnabled ? "ACTIVÉS" : "DÉSACTIVÉS");
   }
   else if (msg.indexOf("\"t\":\"reset_odom\"") >= 0) {
@@ -665,9 +660,9 @@ void loop() {
   }
 
   if (now - lastTelem >= 50) {
-    char m[300];
+    char m[380];
     snprintf(m, sizeof(m),
-             "{\"y\":%.2f,\"yr\":%.2f,\"p\":%.2f,\"ax\":%d,\"ay\":%d,\"az\":%d,\"tl\":%.0f,\"tr\":%.0f,\"ol\":%.0f,\"or\":%.0f,\"lk\":%d,\"ia\":%d,\"rs\":%.0f,\"us\":[%.1f,%.1f,%.1f,%.1f],\"usr\":[%d,%d,%d,%d],\"use\":%d,\"usl\":%.2f,\"px\":%.3f,\"py\":%.3f}",
+             "{\"y\":%.2f,\"yr\":%.2f,\"p\":%.2f,\"ax\":%d,\"ay\":%d,\"az\":%d,\"tl\":%.0f,\"tr\":%.0f,\"ol\":%.0f,\"or\":%.0f,\"lk\":%d,\"ia\":%d,\"rs\":%.0f,\"us\":[%.1f,%.1f,%.1f,%.1f],\"usr\":[%d,%d,%d,%d],\"usm\":[%d,%d,%d,%d],\"use\":%d,\"usl\":%.2f,\"px\":%.3f,\"py\":%.3f}",
              currentYaw, currentYawRate, (float)yawOutput,
              accelX, accelY, accelZ,
              currentTargetL, currentTargetR, currentOutputL, currentOutputR,
@@ -675,6 +670,7 @@ void loop() {
              usSensors[0].distance, usSensors[1].distance, usSensors[2].distance, usSensors[3].distance,
              usSensors[0].responding ? 1 : 0, usSensors[1].responding ? 1 : 0,
              usSensors[2].responding ? 1 : 0, usSensors[3].responding ? 1 : 0,
+             usMask[0] ? 1 : 0, usMask[1] ? 1 : 0, usMask[2] ? 1 : 0, usMask[3] ? 1 : 0,
              usEnabled ? 1 : 0, usEnabled ? usSpeedLimit : 1.0,
              posX, posY);
     ws.textAll(m);
@@ -682,6 +678,17 @@ void loop() {
     Serial.printf("IMU,%.2f,%.4f,%d,%d,%d\n",
                   currentYaw, currentYawRate,
                   accelX, accelY, accelZ);
+    // Debug US toutes les 500ms
+    static unsigned long lastUSDebug = 0;
+    if (now - lastUSDebug >= 500) {
+      Serial.printf("[US] US1=%.1fcm(%d) US2=%.1fcm(%d) US3=%.1fcm(%d) US4=%.1fcm(%d) en=%d\n",
+        usSensors[0].distance, usSensors[0].responding,
+        usSensors[1].distance, usSensors[1].responding,
+        usSensors[2].distance, usSensors[2].responding,
+        usSensors[3].distance, usSensors[3].responding,
+        usEnabled);
+      lastUSDebug = now;
+    }
     lastTelem = now;
   }
   ws.cleanupClients();

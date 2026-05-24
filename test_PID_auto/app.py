@@ -86,6 +86,9 @@ current_dir_y = 0.0
 locked_yaw = 0.0
 is_yaw_locked = False
 
+us_sensor_mask = [True, True, True, True]
+us_enabled_global = True
+
 yaw_history = deque(maxlen=100)
 telemetry_history = deque(maxlen=50)
 
@@ -149,7 +152,30 @@ def _push_telemetry(data: dict):
         is_yaw_locked = int(data.get('lk', 0)) == 1
         if is_yaw_locked and len(yaw_history) >= 2:
             locked_yaw = yaw_history[-2]  # Approximation
+        us_mask = data.get('usm')
+        if isinstance(us_mask, list) and len(us_mask) >= 4:
+            global us_sensor_mask
+            us_sensor_mask = [bool(v) for v in us_mask[:4]]
     socketio.emit('telemetry', data)
+
+
+def _emit_us_status():
+    socketio.emit('us_status', {
+        'enabled': us_enabled_global,
+        'mask': [1 if v else 0 for v in us_sensor_mask],
+    })
+
+
+def _send_us_config_to_esp32():
+    payload = {
+        't': 'us',
+        'en': 1 if us_enabled_global else 0,
+        'us0': 1 if us_sensor_mask[0] else 0,
+        'us1': 1 if us_sensor_mask[1] else 0,
+        'us2': 1 if us_sensor_mask[2] else 0,
+        'us3': 1 if us_sensor_mask[3] else 0,
+    }
+    send_to_esp32(payload)
 
 # ── WiFi listener ─────────────────────────────────────────
 def on_message(ws, message):
@@ -342,7 +368,7 @@ def _export_int8_background():
         result = subprocess.run(
             [sys.executable, export_script],
             cwd=os.path.dirname(os.path.abspath(__file__)),
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, encoding='utf-8', timeout=60
         )
         if result.returncode == 0:
             logger.info("[EXPORT] INT8 OK → drive_assist_rpi_int8.pt")
@@ -410,9 +436,30 @@ def handle_scan_ports(_):
 
 @socketio.on('toggle_us')
 def handle_toggle_us(data):
-    enabled = data.get('enabled', True)
-    send_to_esp32({"t": "us", "en": 1 if enabled else 0})
-    socketio.emit('us_status', {'enabled': enabled})
+    global us_enabled_global
+    us_enabled_global = data.get('enabled', True)
+    _send_us_config_to_esp32()
+    _emit_us_status()
+
+
+@socketio.on('toggle_us_sensor')
+def handle_toggle_us_sensor(data):
+    mask = data.get('mask')
+    if isinstance(mask, list) and len(mask) >= 4:
+        for i in range(4):
+            us_sensor_mask[i] = bool(mask[i])
+    else:
+        idx = int(data.get('index', -1))
+        enabled = bool(data.get('enabled', True))
+        if 0 <= idx < 4:
+            us_sensor_mask[idx] = enabled
+    _send_us_config_to_esp32()
+    _emit_us_status()
+
+
+@socketio.on('connect')
+def handle_connect():
+    _emit_us_status()
 
 if __name__ == '__main__':
     # Démarrer l'auto-détection après un court délai pour laisser le serveur démarrer

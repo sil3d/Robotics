@@ -1,8 +1,15 @@
 // ── Telemetry update ────────────────────────────────────────────────────────
+let usMaskState = [true, true, true, true];
+
 async function updateTelemetry() {
     try {
         const resp = await fetch('/state');
         const data = await resp.json();
+
+        const usMask = Array.isArray(data.us_mask) && data.us_mask.length >= 4
+            ? data.us_mask.map(v => Boolean(v))
+            : [true, true, true, true];
+        usMaskState = usMask.slice();
 
         // Robot mode with color
         const modeEl = document.getElementById('robotMode');
@@ -93,6 +100,30 @@ async function updateTelemetry() {
             const connIMU = document.getElementById('connIMU');
             if (connIMU) connIMU.className = 'status-dot connected';
         }
+
+        const usButtons = document.querySelectorAll('.us-toggle-btn');
+        usButtons.forEach((btn) => {
+            const idx = parseInt(btn.dataset.usIdx, 10);
+            const enabled = usMaskState[idx];
+            btn.classList.toggle('active', enabled);
+            btn.classList.toggle('off', !enabled);
+            btn.textContent = `US${idx + 1} ${enabled ? 'ON' : 'OFF'}`;
+        });
+
+        const usValues = [
+            document.getElementById('us0'),
+            document.getElementById('us1'),
+            document.getElementById('us2'),
+            document.getElementById('us3'),
+        ];
+        usValues.forEach((el, idx) => {
+            if (!el) return;
+            if (!usMaskState[idx]) {
+                el.textContent = 'OFF';
+                el.className = 'sensor-value';
+            }
+        });
+
         if (data.cmd_result) document.getElementById('lastCmd').textContent = data.cmd_result;
     } catch (e) { console.error('Telemetry error:', e); }
 }
@@ -121,6 +152,17 @@ function emergencyStop() {
 
 function sendGripper(cmd) {
     fetch('/api/gripper', {method: 'POST', body: JSON.stringify({value: cmd})});
+}
+
+function sendUltrasonicMask(mask) {
+    fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            us_mask: mask.map(v => v ? 1 : 0),
+            save: 1,
+        })
+    });
 }
 
 // ── Velocity control ─────────────────────────────────────────────────────────
@@ -193,5 +235,12 @@ function saveMissions() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.us-toggle-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.usIdx, 10);
+        usMaskState[idx] = !usMaskState[idx];
+        sendUltrasonicMask(usMaskState);
+    });
+});
 loadMissions();
 setInterval(updateTelemetry, 100);

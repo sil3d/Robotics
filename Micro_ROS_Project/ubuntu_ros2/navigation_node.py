@@ -19,7 +19,7 @@
   SUBSCRIBERS:
    - /robot_pose (geometry_msgs/msg/Pose) - current robot position
    - /waypoint (geometry_msgs/msg/Point) - target waypoint (x, y, 0=theta)
-   - /ultrasonic_data (geometry_msgs/msg/Point) - ultrasonic distances
+   - /ultrasonic_data (std_msgs/msg/String) - JSON: {"us":[front_right, front_left, rear_left, rear_right]}
 
   PUBLISHERS:
    - /cmd_vel (geometry_msgs/msg/Twist) - velocity commands to ESP32
@@ -51,6 +51,7 @@ import rclpy
 import rclpy.parameter
 from geometry_msgs.msg import Point, PoseStamped, Twist
 from rclpy.node import Node
+from std_msgs.msg import String
 from std_srvs.srv import Empty
 
 
@@ -147,7 +148,11 @@ class NavigationNode(Node):
         self.last_confident_pose = None
         self.pose_confidence_threshold = 0.3
 
-        # Ultrasonic obstacle detection state
+        # Ultrasonic obstacle detection state (cm)
+        self.us_front_right = -1.0
+        self.us_front_left = -1.0
+        self.us_back_left = -1.0
+        self.us_back_right = -1.0
         self.us_front = -1.0
         self.us_back = -1.0
         self.us_left = -1.0
@@ -171,7 +176,7 @@ class NavigationNode(Node):
         self.waypoint_sub = self.create_subscription(
             Point, '/waypoint', self.waypoint_callback, 10)
         self.ultrasonic_sub = self.create_subscription(
-            Point, '/ultrasonic_data', self.ultrasonic_callback, 10)
+            String, '/ultrasonic_data', self.ultrasonic_callback, 10)
 
         # Services
         self.e_stop_srv = self.create_service(
@@ -217,19 +222,39 @@ class NavigationNode(Node):
         self.pid_linear.reset()
         self.pid_angular.reset()
 
-    def ultrasonic_callback(self, msg: Point):
+    def ultrasonic_callback(self, msg: String):
         """Process ultrasonic data for obstacle detection"""
-        # msg.x = front, msg.y = back, msg.z = left, msg.w = right (stored in z for legacy)
-        self.us_front = msg.x / 100.0 if msg.x > 0 else -1.0  # cm to meters
-        self.us_back = msg.y / 100.0 if msg.y > 0 else -1.0
-        self.us_left = msg.z / 100.0 if msg.z > 0 else -1.0
-        self.us_right = msg.w / 100.0 if hasattr(msg, 'w') and msg.w > 0 else -1.0
+        try:
+            data = json.loads(msg.data)
+            us = data.get('us', [])
+            if len(us) < 4:
+                return
 
-        # Detect obstacles
-        self.front_obstacle = self.us_front > 0 and self.us_front < self.obstacle_threshold_near
-        self.front_obstacle_warning = self.us_front > 0 and self.us_front < self.obstacle_threshold_far
+            # ESP32 order: US1 front right, US2 front left, US3 rear left, US4 rear right
+            self.us_front_right = float(us[0])
+            self.us_front_left = float(us[1])
+            self.us_back_left = float(us[2])
+            self.us_back_right = float(us[3])
 
-        self.get_logger().debug(f"US: front={self.us_front:.2f}m back={self.us_back:.2f}m")
+            front_vals = [v for v in (self.us_front_right, self.us_front_left) if v > 0]
+            back_vals = [v for v in (self.us_back_left, self.us_back_right) if v > 0]
+            self.us_front = min(front_vals) if front_vals else -1.0
+            self.us_back = min(back_vals) if back_vals else -1.0
+            self.us_left = self.us_front_left if self.us_front_left > 0 else self.us_back_left
+            self.us_right = self.us_front_right if self.us_front_right > 0 else self.us_back_right
+
+            front_m = self.us_front / 100.0 if self.us_front > 0 else -1.0
+            back_m = self.us_back / 100.0 if self.us_back > 0 else -1.0
+
+            # Detect obstacles
+            self.front_obstacle = front_m > 0 and front_m < self.obstacle_threshold_near
+            self.front_obstacle_warning = front_m > 0 and front_m < self.obstacle_threshold_far
+
+            self.get_logger().debug(
+                f"US: front={front_m:.2f}m back={back_m:.2f}m"
+            )
+        except Exception:
+            return
 
     def emergency_stop_callback(self, request, response):
         """Immediate stop - all velocities zero"""

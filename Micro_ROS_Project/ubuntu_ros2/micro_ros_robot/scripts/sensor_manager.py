@@ -4,7 +4,7 @@ For ROS2 Humble - Ubuntu 22.04
 
 Subscribes to:
   /imu_data (geometry_msgs/Accel)
-  /ultrasonic_data (geometry_msgs/Point) - x=front, y=back, z=left, w=right
+  /ultrasonic_data (std_msgs/String) - JSON: {"us":[front, back, left, right]}
   /aruco_detections (geometry_msgs/PoseArray)
   /box_color (std_msgs/String)
 
@@ -15,7 +15,7 @@ Publishes to:
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from geometry_msgs.msg import Accel, Point, PoseArray
+from geometry_msgs.msg import Accel, PoseArray
 import numpy as np
 import time
 import json
@@ -37,7 +37,7 @@ class SensorManager(Node):
         self.imu_sub = self.create_subscription(
             Accel, '/imu_data', self.imu_callback, 10)
         self.ultrasonic_sub = self.create_subscription(
-            Point, '/ultrasonic_data', self.ultrasonic_callback, 10)
+            String, '/ultrasonic_data', self.ultrasonic_callback, 10)
         self.aruco_sub = self.create_subscription(
             PoseArray, '/aruco_detections', self.apriltag_callback, 10)
         self.color_sub = self.create_subscription(
@@ -132,10 +132,17 @@ class SensorManager(Node):
         now = time.time()
         self.ultrasonic_last_update = now
 
-        front = msg.x   # front
-        back = msg.y    # back
-        left = msg.z    # left
-        right = msg.w   # right
+        try:
+            data = json.loads(msg.data)
+            us = data.get('us', [])
+            if len(us) < 4:
+                return
+            front = float(us[0])
+            back = float(us[1])
+            left = float(us[2])
+            right = float(us[3])
+        except Exception:
+            return
 
         self._check_ultrasonic_single('front', front)
         self._check_ultrasonic_single('back', back)

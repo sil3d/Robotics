@@ -35,11 +35,11 @@
 
 import json
 import math
+import os
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Accel, Point, Pose, PoseStamped, Twist
 from std_msgs.msg import String, Float32
-import json as _json
 from std_srvs.srv import Empty
 from flask import Flask, render_template, Response, jsonify, request
 import cv2
@@ -110,6 +110,7 @@ class RobotRosBridge(Node):
         self.ay = 0.0
         self.az = 0.0
         self.us = [-1.0, -1.0, -1.0, -1.0]
+        self.us_mask = [1, 1, 1, 1]
         self.last_cmd_result = ""
         self.odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
 
@@ -155,6 +156,8 @@ class RobotRosBridge(Node):
         try:
             data = json.loads(msg.data)
             self.us = [float(v) for v in data['us']]
+            if 'usm' in data and isinstance(data['usm'], list) and len(data['usm']) >= 4:
+                self.us_mask = [1 if bool(v) else 0 for v in data['usm'][:4]]
         except Exception:
             pass
 
@@ -170,7 +173,7 @@ class RobotRosBridge(Node):
     def send_config(self, cfg: dict):
         """Envoie JSON de config PID/trims/rampe au topic /robot_cfg"""
         msg = String()
-        msg.data = _json.dumps(cfg)
+        msg.data = json.dumps(cfg)
         self.cfg_pub.publish(msg)
 
     def send_gripper(self, value):
@@ -182,7 +185,7 @@ class RobotRosBridge(Node):
     def send_mission_ctrl(self, payload: dict):
         """Envoie un contrôle LSTM/mission au topic /mission_ctrl."""
         msg = String()
-        msg.data = _json.dumps(payload)
+        msg.data = json.dumps(payload)
         self.mission_ctrl_pub.publish(msg)
 
     def send_velocity(self, linear_x, angular_z):
@@ -199,6 +202,8 @@ class RobotRosBridge(Node):
     def sensor_health_callback(self, msg: String):
         try:
             self.sensor_health = json.loads(msg.data)
+            if 'usm' in self.sensor_health and isinstance(self.sensor_health['usm'], list) and len(self.sensor_health['usm']) >= 4:
+                self.us_mask = [1 if bool(v) else 0 for v in self.sensor_health['usm'][:4]]
         except json.JSONDecodeError:
             pass
 
@@ -273,7 +278,7 @@ app = Flask(__name__)
 
 state_lock = threading.Lock()
 app_state = {
-    "imu": {"yaw_deg": 0, "omega_z": 0, "ax": 0, "ay": 0, "az": 0, "us": [-1, -1, -1, -1]},
+    "imu": {"yaw_deg": 0, "omega_z": 0, "ax": 0, "ay": 0, "az": 0, "us": [-1, -1, -1, -1], "us_mask": [1, 1, 1, 1]},
     "cmd_result": "",
     "map_frame": None,
     "imu_3d_frame": None,
@@ -476,6 +481,7 @@ def state():
             "odom": app_state.get("odom", {"x": 0.0, "y": 0.0, "yaw": 0.0}),
             "cmd_result": app_state["cmd_result"],
             "sensor_health": app_state.get("sensor_health", {}),
+            "us_mask": app_state["imu"].get("us_mask", [1, 1, 1, 1]),
             "localization_confidence": app_state.get("localization_confidence", 0.0),
             "robot_mode": app_state.get("robot_mode", "UNKNOWN"),
             "box_info": app_state.get("box_info", {}),
@@ -501,7 +507,6 @@ def velocity_route():
         return jsonify({"status": "blocked",
                         "reason": "Mission active — arrêtez la mission avant de piloter manuellement"}), 409
     if ros_bridge:
-        import json
         data = json.loads(request.data)
         ros_bridge.send_velocity(data.get('linear', 0.0), data.get('angular', 0.0))
     return jsonify({"status": "ok"})
@@ -518,11 +523,10 @@ def api_config_get():
 @app.route('/api/config', methods=['POST'])
 def api_config():
     """Envoie config PID/trims/rampe au robot via /robot_cfg ET sauvegarde dans robot_config.json.
-    Body JSON: {ykp, yki, ykd, ta, tb, ma, mb, rs, rb, rn, reset_odom, save, us_en}"""
+    Body JSON: {ykp, yki, ykd, ta, tb, ma, mb, rs, rb, rn, reset_odom, save, us_en, us_mask}"""
     if not ros_bridge:
         return jsonify({"status": "error", "message": "No ROS bridge"})
     data = json.loads(request.data or '{}')
-    ros_bridge.send_config(data)
     # Persister dans la source de vérité globale
     cfg = _load_robot_config()
     if data.get("ykp") is not None: cfg.setdefault("pid", {})["kp"]    = data["ykp"]
@@ -535,6 +539,15 @@ def api_config():
     if data.get("rs")  is not None: cfg.setdefault("ramp", {})["speed"]   = data["rs"]
     if data.get("rb")  is not None: cfg.setdefault("ramp", {})["brake"]   = data["rb"]
     if data.get("rn")  is not None: cfg.setdefault("ramp", {})["neutral"] = data["rn"]
+    if data.get("us_mask") is not None:
+        mask = data.get("us_mask")
+        if isinstance(mask, list) and len(mask) >= 4:
+            cfg["us_mask"] = [1 if bool(mask[i]) else 0 for i in range(4)]
+            data["us0"] = cfg["us_mask"][0]
+            data["us1"] = cfg["us_mask"][1]
+            data["us2"] = cfg["us_mask"][2]
+            data["us3"] = cfg["us_mask"][3]
+    ros_bridge.send_config(data)
     _save_robot_config(cfg)
     return jsonify({"status": "ok", "sent": data})
 
@@ -564,7 +577,6 @@ def api_mission_ctrl():
     return jsonify({"status": "ok", "sent": data})
 
 # ─── ROBOT CONFIG GLOBAL (source de vérité partagée) ───────────────────────
-import os
 _DATA_ROOT   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROBOT_CONFIG_FILE = os.path.join(_DATA_ROOT, "data", "robot_config.json")
 
@@ -593,6 +605,9 @@ def _robot_config_to_esp32_payload(cfg: dict) -> dict:
     trims  = cfg.get("trims",  {})
     minpwm = cfg.get("minpwm", {})
     ramp   = cfg.get("ramp",   {})
+    us_mask = cfg.get("us_mask", [1, 1, 1, 1])
+    if not isinstance(us_mask, list) or len(us_mask) < 4:
+        us_mask = [1, 1, 1, 1]
     return {
         "ykp": pid.get("kp",  4.0),
         "yki": pid.get("ki",  0.02),
@@ -604,6 +619,10 @@ def _robot_config_to_esp32_payload(cfg: dict) -> dict:
         "rs":  ramp.get("speed",   80.0),
         "rb":  ramp.get("brake",  120.0),
         "rn":  ramp.get("neutral", 200.0),
+        "us0": 1 if bool(us_mask[0]) else 0,
+        "us1": 1 if bool(us_mask[1]) else 0,
+        "us2": 1 if bool(us_mask[2]) else 0,
+        "us3": 1 if bool(us_mask[3]) else 0,
     }
 
 # ─── MISSIONS CONFIG API ──────────────────────────────────────────────────
@@ -730,6 +749,7 @@ def main():
                     "ay": ros_bridge.ay,
                     "az": ros_bridge.az,
                     "us": ros_bridge.us.copy(),
+                    "us_mask": ros_bridge.us_mask.copy(),
                 }
                 app_state["cmd_result"]   = ros_bridge.last_cmd_result
                 app_state["odom"]         = ros_bridge.odom.copy()
