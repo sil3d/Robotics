@@ -1007,6 +1007,38 @@
             </div>
             <div class="us-stop-alert" id="us-stop-alert">🐌 RALENTI - VITESSE LIMITÉE</div>
         </div>
+
+        <div class="us-section">
+            <div class="us-header">
+                <div class="us-title">
+                    <div class="section-icon">🧭</div>
+                    IMU (Accéléromètre)
+                </div>
+            </div>
+            <div class="us-grid">
+                <div class="us-sensor">
+                    <div class="us-indicator ok" id="ax-ind"></div>
+                    <div class="us-info">
+                        <div class="us-label">Acc X</div>
+                        <div class="us-value" id="ax-val">--</div>
+                    </div>
+                </div>
+                <div class="us-sensor">
+                    <div class="us-indicator ok" id="ay-ind"></div>
+                    <div class="us-info">
+                        <div class="us-label">Acc Y</div>
+                        <div class="us-value" id="ay-val">--</div>
+                    </div>
+                </div>
+                <div class="us-sensor">
+                    <div class="us-indicator ok" id="az-ind"></div>
+                    <div class="us-info">
+                        <div class="us-label">Acc Z</div>
+                        <div class="us-value" id="az-val">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div class="panel main">
@@ -1282,10 +1314,15 @@
 
             yawValue.textContent = (data.y || 0).toFixed(2) + '°';
             pidValue.textContent = pidVal.toFixed(2);
-            
+
+            // Update IMU (accelerometer)
+            if (data.ax !== undefined) document.getElementById('ax-val').textContent = data.ax.toFixed(0);
+            if (data.ay !== undefined) document.getElementById('ay-val').textContent = data.ay.toFixed(0);
+            if (data.az !== undefined) document.getElementById('az-val').textContent = data.az.toFixed(0);
+
             // Update ultrasons
             updateUltrasons(data);
-            
+
             // Update robot position/trajectory
             updatePosition(data);
         });
@@ -1308,12 +1345,15 @@
         });
 
         socket.on('ia_update', (data) => {
-            const kp = typeof data.kp === 'number' ? data.kp.toFixed(2) : '0.00';
-            const ki = typeof data.ki === 'number' ? data.ki.toFixed(2) : (document.getElementById('val-ki').value || '0.00');
-            const kd = typeof data.kd === 'number' ? data.kd.toFixed(2) : '0.00';
-            document.getElementById('val-kp').value = kp;
-            document.getElementById('val-ki').value = ki;
-            document.getElementById('val-kd').value = kd;
+            const kpEl = document.getElementById('val-kp');
+            const kiEl = document.getElementById('val-ki');
+            const kdEl = document.getElementById('val-kd');
+            if (typeof data.kp === 'number') kpEl.value = data.kp.toFixed(2);
+            if (typeof data.ki === 'number') kiEl.value = data.ki.toFixed(2);
+            if (typeof data.kd === 'number') kdEl.value = data.kd.toFixed(2);
+            const kp = kpEl.value || '0.00';
+            const ki = kiEl.value || '0.00';
+            const kd = kdEl.value || '0.00';
             const time = new Date().toLocaleTimeString('fr-FR');
             const safeMsg = String(data.msg || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             iaConsole.innerHTML = `
@@ -1329,15 +1369,29 @@
 
         function sendPid() {
             socket.emit('manual_pid', {
-                kp: parseFloat(document.getElementById('val-kp').value),
-                ki: parseFloat(document.getElementById('val-ki').value),
-                kd: parseFloat(document.getElementById('val-kd').value)
+                ykp: parseFloat(document.getElementById('val-kp').value),
+                yki: parseFloat(document.getElementById('val-ki').value),
+                ykd: parseFloat(document.getElementById('val-kd').value)
             });
         }
 
+        const SAVE_STEPS = {
+            eeprom:           '💾 EEPROM ESP32',
+            robot_config_json:'📄 robot_config.json',
+            model_pt:         '🧠 drive_assist_model.pt',
+            export_int8:      '📦 Export INT8 (Pi)',
+        };
+        socket.on('save_status', (data) => {
+            const label  = SAVE_STEPS[data.step] || data.step;
+            const icon   = data.status === 'ok' ? '✅' : data.status === 'running' ? '⏳' : '❌';
+            const detail = data.msg ? ` — ${data.msg}` : '';
+            updateConsole(`${icon} ${label}${detail}`, data.status === 'error' ? 'warning' : '');
+        });
+
         document.getElementById('btn-save-pid').addEventListener('click', () => {
             sendPid();
-            updateConsole('Paramètres PID envoyés.', '');
+            socket.emit('save_config', {});
+            updateConsole('⏳ Sauvegarde en cours...', '');
         });
 
         // Auto-send PID on input change (debounced 600ms)
@@ -1595,6 +1649,8 @@
         const speedDisplayEl = document.getElementById('speed-display');
         manualSpeedEl.addEventListener('input', () => {
             speedDisplayEl.textContent = manualSpeedEl.value + '%';
+            // Si on maintient une touche, renvoyer la commande avec la nouvelle vitesse
+            if (ds.F || ds.B || ds.L || ds.R) sendDirection();
         });
 
         const gripperSlider = document.getElementById('gripper-slider');
@@ -1612,8 +1668,9 @@
         function sendDirection() {
             const spd = parseInt(manualSpeedEl.value) / 100;
             const y = (ds.F ? spd : 0) + (ds.B ? -spd : 0);
-            const x = (ds.R ? spd : 0) + (ds.L ? -spd : 0);
-            console.log("sendDirection: x=" + x + ", y=" + y + ", ds=" + JSON.stringify(ds));
+            // Rotation: seul = 50% du slider, combiné = 40% (évite qu'une roue s'arrête)
+            const rotRatio = (Math.abs(y) > 0.01) ? 0.4 : 0.5;
+            const x = ((ds.R ? 1 : 0) + (ds.L ? -1 : 0)) * spd * rotRatio;
             clearTimeout(jt); jt = setTimeout(() => { socket.emit('command', {t: 'dir', x, y}); }, 15);
         }
 

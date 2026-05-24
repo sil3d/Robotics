@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import threading
 import logging
@@ -6,7 +7,17 @@ import numpy as np
 from collections import deque
 from flask import Flask, render_template
 from flask_socketio import SocketIO
-import websocket
+# Fix: websocket-client (not websockets) provides WebSocketApp
+try:
+    import websocket as wsclient
+except ImportError as exc:
+    print("[ERROR] websocket-client is not installed.")
+    print("  Run: pip uninstall websockets -y && pip install websocket-client")
+    raise exc
+
+WebSocketApp = wsclient.WebSocketApp
+create_connection = wsclient.create_connection
+
 try:
     import serial
     import serial.tools.list_ports
@@ -26,6 +37,30 @@ ESP32_IP    = "192.168.4.1"
 WS_URL      = f"ws://{ESP32_IP}/ws"
 SERIAL_BAUD = 115200
 
+# ── Config globale partagée ───────────────────────────────
+_CFG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "robot_config.json"
+)
+
+def _load_global_config():
+    """Charge robot_config.json. Retourne {} si absent ou invalide."""
+    try:
+        with open(_CFG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_global_config(cfg: dict):
+    """Écrit robot_config.json de façon atomique."""
+    try:
+        tmp = _CFG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, _CFG_PATH)
+    except Exception as e:
+        logger.warning("[CFG] Sauvegarde globale échouée: %s", e)
+
 robot_ws         = None
 serial_conn      = None
 connection_mode  = 'wifi'
@@ -37,9 +72,14 @@ _history_lock = threading.Lock()
 # ── État ──────────────────────────────────────────────────
 auto_pilot_active = False  # IA DÉSACTIVÉE par défaut
 
-yaw_kp, yaw_ki, yaw_kd = 4.0, 0.08, 0.6
-motor_a_trim, motor_b_trim = 0.0, 0.0
-motor_a_minpwm, motor_b_minpwm = 0.0, 0.0
+_gcfg = _load_global_config()
+yaw_kp       = float(_gcfg.get("pid",    {}).get("kp",  4.0))
+yaw_ki       = float(_gcfg.get("pid",    {}).get("ki",  0.02))
+yaw_kd       = float(_gcfg.get("pid",    {}).get("kd",  0.7))
+motor_a_trim  = float(_gcfg.get("trims",  {}).get("a",   0.0))
+motor_b_trim  = float(_gcfg.get("trims",  {}).get("b",   0.0))
+motor_a_minpwm= float(_gcfg.get("minpwm", {}).get("a",  55.0))
+motor_b_minpwm= float(_gcfg.get("minpwm", {}).get("b",  55.0))
 
 current_dir_x = 0.0
 current_dir_y = 0.0
@@ -88,7 +128,14 @@ def connect_serial(port=None):
         return False
 
 def switch_to_wifi():
-    global connection_mode
+    global connection_mode, serial_conn
+    with _serial_lock:
+        if serial_conn and serial_conn.is_open:
+            try:
+                serial_conn.close()
+            except Exception:
+                pass
+        serial_conn = None
     connection_mode = 'wifi'
     logger.info("[WIFI] Switched to WiFi")
     socketio.emit('connection_status', {'mode': 'wifi'})
@@ -109,6 +156,9 @@ def on_message(ws, message):
     if connection_mode != 'wifi':
         return
     try:
+        # websocket-client returns bytes for raw frames; decode UTF-8
+        if isinstance(message, bytes):
+            message = message.decode('utf-8')
         data = json.loads(message)
         _push_telemetry(data)
     except Exception as e:
@@ -118,7 +168,7 @@ def esp32_listener():
     global robot_ws
     while True:
         try:
-            ws = websocket.WebSocketApp(WS_URL, on_message=on_message,
+            ws = WebSocketApp(WS_URL, on_message=on_message,
                 on_error=lambda _ws, err: logger.warning("WS: %s", err))
             with _ws_lock:
                 robot_ws = ws
@@ -135,29 +185,51 @@ threading.Thread(target=esp32_listener, daemon=True).start()
 def serial_listener():
     global serial_conn, connection_mode
     while True:
-        if connection_mode != 'usb':
-            time.sleep(0.1); continue
+        # Read Serial even in WiFi mode (ESP32 can be connected via USB)
         with _serial_lock:
             conn = serial_conn
         if not conn or not conn.is_open:
             time.sleep(0.1); continue
         try:
             line = conn.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith('{'):
+            if line.startswith('IMU,'):
+                # Format: IMU,yaw,yaw_rate,ax,ay,az
+                parts = line.split(',')
+                if len(parts) >= 6:
+                    data = {
+                        'y': float(parts[1]),
+                        'yr': float(parts[2]),
+                        'ax': int(parts[3]),
+                        'ay': int(parts[4]),
+                        'az': int(parts[5])
+                    }
+                    _push_telemetry(data)
+            elif line.startswith('{'):
                 data = json.loads(line)
                 if 'y' in data:
                     _push_telemetry(data)
         except Exception as e:
             logger.warning("USB error: %s", e)
-            connection_mode = 'wifi'
 
 threading.Thread(target=serial_listener, daemon=True).start()
 
 # Auto-detect (déplacé dans une fonction pour éviter l'émission avant démarrage)
 def auto_detect_connection():
-    if not connect_serial():
-        logger.info("[WIFI] No USB, using WiFi")
-        socketio.emit('connection_status', {'mode': 'wifi'})
+    # Try to connect Serial for IMU data (even if WiFi is used for commands)
+    if SERIAL_AVAILABLE:
+        ports = serial.tools.list_ports.comports()
+        if len(ports) == 1:
+            try:
+                with _serial_lock:
+                    if serial_conn and serial_conn.is_open:
+                        serial_conn.close()
+                    serial_conn = serial.Serial(ports[0].device, SERIAL_BAUD, timeout=1)
+                logger.info(f"[USB] Serial connected for IMU: {ports[0].device}")
+            except Exception as e:
+                logger.warning(f"[USB] Serial connect failed: {e}")
+    # Default to WiFi for commands
+    switch_to_wifi()
+    logger.info("[WIFI] Startup default: WiFi mode enabled (USB available via button)")
 
 # ── IA Loop ───────────────────────────────────────────────
 def ia_loop():
@@ -212,7 +284,7 @@ def send_to_esp32(data):
             if robot_ws and robot_ws.sock and robot_ws.sock.connected:
                 robot_ws.send(payload)
             else:
-                ws = websocket.create_connection(WS_URL, timeout=2.0)
+                ws = create_connection(WS_URL, timeout=2.0)
                 ws.send(payload)
                 ws.close()
     except Exception as e:
@@ -248,15 +320,71 @@ def handle_toggle_auto(data):
 
 @socketio.on('manual_pid')
 def handle_manual_pid(data):
-    global yaw_kp, yaw_ki, yaw_kd
-    yaw_kp = data.get('ykp', yaw_kp); yaw_ki = data.get('yki', yaw_ki); yaw_kd = data.get('ykd', yaw_kd)
+    global yaw_kp, yaw_ki, yaw_kd, motor_a_trim, motor_b_trim, motor_a_minpwm, motor_b_minpwm
+    yaw_kp = data.get('ykp', data.get('kp', yaw_kp))
+    yaw_ki = data.get('yki', data.get('ki', yaw_ki))
+    yaw_kd = data.get('ykd', data.get('kd', yaw_kd))
+    motor_a_trim   = data.get('ta', motor_a_trim)
+    motor_b_trim   = data.get('tb', motor_b_trim)
+    motor_a_minpwm = data.get('ma', motor_a_minpwm)
+    motor_b_minpwm = data.get('mb', motor_b_minpwm)
     send_to_esp32({"t": "cfg", "ykp": yaw_kp, "yki": yaw_ki, "ykd": yaw_kd,
                    "ta": motor_a_trim, "tb": motor_b_trim,
                    "ma": motor_a_minpwm, "mb": motor_b_minpwm})
 
+def _export_int8_background():
+    """Lance export_rpi.py en arrière-plan et notifie le front quand c'est fini."""
+    try:
+        import subprocess, sys
+        export_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "export_rpi.py")
+        logger.info("[EXPORT] Démarrage export INT8...")
+        socketio.emit('save_status', {'step': 'export_int8', 'status': 'running'})
+        result = subprocess.run(
+            [sys.executable, export_script],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            logger.info("[EXPORT] INT8 OK → drive_assist_rpi_int8.pt")
+            socketio.emit('save_status', {'step': 'export_int8', 'status': 'ok',
+                                          'msg': 'drive_assist_rpi_int8.pt prêt'})
+        else:
+            logger.warning("[EXPORT] Erreur export: %s", result.stderr[-300:])
+            socketio.emit('save_status', {'step': 'export_int8', 'status': 'error',
+                                          'msg': result.stderr[-200:]})
+    except Exception as e:
+        logger.warning("[EXPORT] Exception: %s", e)
+        socketio.emit('save_status', {'step': 'export_int8', 'status': 'error', 'msg': str(e)})
+
 @socketio.on('save_config')
 def handle_save_config(_):
+    # 1. EEPROM ESP32
     send_to_esp32({"t": "save"})
+    socketio.emit('save_status', {'step': 'eeprom', 'status': 'ok'})
+
+    # 2. robot_config.json (source de vérité globale)
+    cfg = _load_global_config()
+    cfg.setdefault("_comment", "Source de vérité globale.")
+    cfg["pid"]    = {"kp": yaw_kp, "ki": yaw_ki, "kd": yaw_kd}
+    cfg["trims"]  = {"a": motor_a_trim, "b": motor_b_trim}
+    cfg["minpwm"] = {"a": motor_a_minpwm, "b": motor_b_minpwm}
+    ia = ai_agent.get_learned_values()
+    cfg["ia_trims"] = {"L": round(ia[0], 3), "R": round(ia[1], 3), "boost": round(ia[2], 4)}
+    _save_global_config(cfg)
+    logger.info("[CFG] robot_config.json mis à jour")
+    socketio.emit('save_status', {'step': 'robot_config_json', 'status': 'ok'})
+
+    # 3. Modèle IA .pt (force save)
+    try:
+        if hasattr(ai_agent, 'agent'):
+            ai_agent.agent._save(force=True)
+        socketio.emit('save_status', {'step': 'model_pt', 'status': 'ok',
+                                      'msg': 'drive_assist_model.pt sauvegardé'})
+    except Exception as e:
+        socketio.emit('save_status', {'step': 'model_pt', 'status': 'error', 'msg': str(e)})
+
+    # 4. Export INT8 pour Raspberry Pi (en arrière-plan)
+    threading.Thread(target=_export_int8_background, daemon=True).start()
 
 @socketio.on('get_ia_stats')
 def handle_get_ia_stats(_):

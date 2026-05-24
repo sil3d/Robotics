@@ -41,12 +41,17 @@
   ===========================================================================
 """
 
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, Point, Twist
-from std_srvs.srv import Empty
-import numpy as np
+import json
 import math
+import os
+import time
+
+import numpy as np
+import rclpy
+import rclpy.parameter
+from geometry_msgs.msg import Point, PoseStamped, Twist
+from rclpy.node import Node
+from std_srvs.srv import Empty
 
 
 class PIDController:
@@ -58,13 +63,19 @@ class PIDController:
         self.output_limit = output_limit
         self.prev_error = 0.0
         self.integral = 0.0
-        self.dt = 0.05
+        self._last_ts = time.perf_counter()
 
     def compute(self, current, target):
+        now = time.perf_counter()
+        dt = now - self._last_ts
+        self._last_ts = now
+        if dt <= 0 or dt > 0.5:
+            dt = 0.05
         error = target - current
-        self.integral += error * self.dt
-        self.integral = max(-50, min(50, self.integral))  # anti-windup
-        derivative = (error - self.prev_error) / self.dt if self.dt > 0 else 0
+        self.integral += error * dt
+        windup_limit = min(5.0, self.output_limit / max(self.ki, 1e-6))
+        self.integral = max(-windup_limit, min(windup_limit, self.integral))
+        derivative = (error - self.prev_error) / dt
         self.prev_error = error
 
         output = self.kp * error + self.ki * self.integral + self.kd * derivative
@@ -74,6 +85,7 @@ class PIDController:
         """Reset integrator and derivative state (call when stopping)"""
         self.integral = 0.0
         self.prev_error = 0.0
+        self._last_ts = time.perf_counter()
 
 
 class NavigationNode(Node):
@@ -95,6 +107,9 @@ class NavigationNode(Node):
         self.declare_parameter('obstacle_threshold_far', 0.50)    # meters - slow down
         self.declare_parameter('obstacle_slowdown_factor', 0.5)   # multiply speed by this
         self.declare_parameter('use_sensor_confidence', True)
+
+        # H1: override paramètres depuis robot_config.json si disponible
+        self._apply_robot_config()
 
         self.max_lin = self.get_parameter('max_linear_speed').value
         self.max_ang = self.get_parameter('max_angular_speed').value
@@ -121,6 +136,7 @@ class NavigationNode(Node):
         self.angle_threshold = self.get_parameter('angle_threshold').value
 
         self.get_logger().info('Navigation Node started')
+
 
         # Current state
         self.current_x = 0.0
@@ -198,10 +214,8 @@ class NavigationNode(Node):
         self.waypoint_active = True
         self.get_logger().info(f'New waypoint: ({self.target_x:.2f}, {self.target_y:.2f})')
         # Reset PID state
-        self.pid_linear.prev_error = 0.0
-        self.pid_linear.integral = 0.0
-        self.pid_angular.prev_error = 0.0
-        self.pid_angular.integral = 0.0
+        self.pid_linear.reset()
+        self.pid_angular.reset()
 
     def ultrasonic_callback(self, msg: Point):
         """Process ultrasonic data for obstacle detection"""
@@ -329,6 +343,36 @@ class NavigationNode(Node):
         siny_cosp = 2 * (w * z + x * y)
         cosy_cosp = 1 - 2 * (y * y + z * z)
         return math.atan2(siny_cosp, cosy_cosp)
+
+    def _apply_robot_config(self):
+        """Charge robot_config.json et override les paramètres ROS2 si présents."""
+        cfg_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            'data', 'robot_config.json'
+        )
+        try:
+            with open(cfg_path, 'r') as f:
+                cfg = json.load(f)
+        except Exception:
+            return
+        nav = cfg.get('navigation', {})
+        overrides = [
+            ('max_linear_speed',       nav.get('max_linear_speed')),
+            ('max_angular_speed',      nav.get('max_angular_speed')),
+            ('pid_linear_kp',          nav.get('pid_linear_kp')),
+            ('pid_linear_ki',          nav.get('pid_linear_ki')),
+            ('pid_linear_kd',          nav.get('pid_linear_kd')),
+            ('pid_angular_kp',         nav.get('pid_angular_kp')),
+            ('pid_angular_ki',         nav.get('pid_angular_ki')),
+            ('pid_angular_kd',         nav.get('pid_angular_kd')),
+            ('obstacle_threshold_near',nav.get('obstacle_threshold_near')),
+            ('obstacle_threshold_far', nav.get('obstacle_threshold_far')),
+        ]
+        for param, val in overrides:
+            if val is not None:
+                self.set_parameters([rclpy.parameter.Parameter(param,
+                    rclpy.parameter.Parameter.Type.DOUBLE, float(val))])
+        self.get_logger().info(f'[CFG] robot_config.json nav section loaded from {cfg_path}')
 
     def destroy_node(self):
         self._publish_vel(0.0, 0.0)

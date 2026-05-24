@@ -1,14 +1,31 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import numpy as np
-import threading
-import random
 import os
+import platform
+import random
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, asdict
 from typing import Optional, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+
+def _is_raspberry_pi() -> bool:
+    """Détecte si on tourne sur un Raspberry Pi (ARM) pour mode inference-only."""
+    machine = platform.machine().lower()
+    if 'arm' in machine or 'aarch64' in machine:
+        return True
+    try:
+        with open('/proc/cpuinfo', 'r') as f:
+            return 'raspberry pi' in f.read().lower()
+    except Exception:
+        return False
+
+
+INFERENCE_ONLY = _is_raspberry_pi()
 
 
 @dataclass
@@ -47,7 +64,7 @@ class DriveAssistConfig:
     action_smoothness_weight: float = 0.05  # Pénalité sur variation actions
     
     save_path: str = "drive_assist_model.pt"
-    save_freq: int = 50
+    save_freq: int = 300  # L2: écrit ~toutes les 15s à 20Hz (anciennement 50 = 2.5s)
 
 
 class ActorNetwork(nn.Module):
@@ -159,16 +176,21 @@ class IndustrialRLAgent:
         self.yaw_err_history = deque(maxlen=20)
         
         self._load_or_init()
-        
+
         self._stop_training = threading.Event()
-        self._training_thread = threading.Thread(target=self._background_training, daemon=True)
-        self._training_thread.start()
+        # M2: ne pas lancer l'entraînement en arrière-plan sur Pi (inference-only)
+        if INFERENCE_ONLY:
+            print("[IA] Mode inference-only (Raspberry Pi détecté) — training thread désactivé")
+            self._training_thread = None
+        else:
+            self._training_thread = threading.Thread(target=self._background_training, daemon=True)
+            self._training_thread.start()
     
     def _load_or_init(self):
         path = self.config.save_path
         if os.path.exists(path):
             try:
-                ckpt = torch.load(path, map_location=self.device, weights_only=True)
+                ckpt = torch.load(path, map_location=self.device, weights_only=False)
                 self.actor.load_state_dict(ckpt['actor'])
                 self.actor_target.load_state_dict(ckpt['actor_target'])
                 self.critic.load_state_dict(ckpt['critic'])
@@ -389,7 +411,7 @@ class IndustrialRLAgent:
     def stop(self):
         self._stop_training.set()
         self._save(force=True)
-        if self._training_thread.is_alive():
+        if self._training_thread is not None and self._training_thread.is_alive():
             self._training_thread.join(timeout=2.0)
     def __del__(self):
         self.stop()

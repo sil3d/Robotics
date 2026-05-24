@@ -352,12 +352,12 @@ def draw_map(yaw_deg, ax, ay, az, us_distances, robot_x=0.0, robot_y=0.0, w=640,
         y_pos = map_center_y - int(i * scale * 0.5)
         cv2.line(img, (0, y_pos), (w, y_pos), (40, 40, 40), 1)
 
-    # Draw station markers (fixed positions)
+    # Draw station markers (fixed positions — cm converted to meters)
     stations = {
-        'Home': (0, 0),
-        'MFG': (1.5, 0),
-        'Storage A': (0, 1.5),
-        'Storage B': (1.5, 1.5),
+        'HOME': (0, 0),
+        'MFG': (0, 0.70),
+        'Station A': (-0.60, 0.30),
+        'Station B': (0.60, 0.55),
     }
 
     for name, (sx, sy) in stations.items():
@@ -547,12 +547,38 @@ HTML_TEMPLATE = '''
             </div>
 
             <div class="panel">
-                <div class="panel-title">Actions</div>
+                <div class="panel-title">Mission Config</div>
+                <div id="missionList" style="font-size:0.85em; color:#ccc; margin-bottom:8px;">Loading...</div>
+                <div style="margin-bottom:6px;">
+                    <label style="color:#aaa;">Home Tag: <input type="number" id="missionHomeTag" value="12" style="width:50px; background:#222; color:#fff; border:1px solid #444;"></label>
+                    <label style="color:#aaa; margin-left:10px;"><input type="checkbox" id="missionRepeat" checked> Repeat</label>
+                </div>
+                <div id="missionEditor" style="margin-bottom:8px;"></div>
+                <div class="action-buttons" style="margin-top:8px;">
+                    <button onclick="addMissionRow()">+ Add Mission</button>
+                    <button onclick="saveMissions()">Save Missions</button>
+                    <button onclick="loadMissions()">Reload</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Quick Commands</div>
                 <div class="action-buttons">
                     <button onclick="calibrateGripper()">Calibrate Gripper</button>
                     <button onclick="startScan()">Start Scan</button>
                     <button onclick="resetRecovery()">Reset Recovery</button>
+                    <button onclick="resetOdom()">Reset Odom</button>
                     <button class="emergency" onclick="emergencyStop()">EMERGENCY STOP</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Gripper Control</div>
+                <div class="action-buttons">
+                    <button onclick="sendGripper('open')">Open</button>
+                    <button onclick="sendGripper('close')">Close</button>
+                    <button onclick="sendGripper('0')">0°</button>
+                    <button onclick="sendGripper('90')">90°</button>
                 </div>
             </div>
 
@@ -733,9 +759,78 @@ HTML_TEMPLATE = '''
         fetch('/service/reset_recovery', {method: 'POST'});
     }
 
+    // ── Mission Editor ──────────────────────────────────────────────
+    let missionRows = [];
+
+    function loadMissions() {
+        fetch('/api/missions').then(r => r.json()).then(data => {
+            const missions = data.missions || [];
+            document.getElementById('missionHomeTag').value = data.home_tag || 12;
+            document.getElementById('missionRepeat').checked = data.repeat !== false;
+            missionRows = missions.map(m => ({
+                pickup_tag: m.pickup_tag, drop_tag: m.drop_tag,
+                color: m.color || 'blue', label: m.label || ''
+            }));
+            renderMissionRows();
+            document.getElementById('missionList').textContent =
+                missions.length + ' mission(s) configured';
+        }).catch(e => {
+            document.getElementById('missionList').textContent = 'Error loading missions';
+        });
+    }
+
+    function renderMissionRows() {
+        const editor = document.getElementById('missionEditor');
+        let html = '';
+        missionRows.forEach((m, i) => {
+            html += '<div style="margin-bottom:4px; display:flex; gap:4px; align-items:center;">' +
+                '<span style="color:#888; min-width:18px;">#' + (i+1) + '</span>' +
+                '<input type="number" placeholder="Pickup" value="' + (m.pickup_tag||'') + '" style="width:50px; background:#222; color:#fff; border:1px solid #444;" onchange="missionRows['+i+'].pickup_tag=+this.value">' +
+                '<span style="color:#666;">→</span>' +
+                '<input type="number" placeholder="Drop" value="' + (m.drop_tag||'') + '" style="width:50px; background:#222; color:#fff; border:1px solid #444;" onchange="missionRows['+i+'].drop_tag=+this.value">' +
+                '<select style="background:#222; color:#fff; border:1px solid #444;" onchange="missionRows['+i+'].color=this.value">' +
+                    '<option value="blue"' + (m.color==='blue'?' selected':'') + '>Blue</option>' +
+                    '<option value="green"' + (m.color==='green'?' selected':'') + '>Green</option>' +
+                '</select>' +
+                '<input type="text" placeholder="Label" value="' + (m.label||'') + '" style="flex:1; background:#222; color:#fff; border:1px solid #444;" onchange="missionRows['+i+'].label=this.value">' +
+                '<button onclick="missionRows.splice('+i+',1); renderMissionRows();" style="background:#600; color:#fff; border:none; cursor:pointer;">✕</button>' +
+                '</div>';
+        });
+        editor.innerHTML = html;
+    }
+
+    function addMissionRow() {
+        missionRows.push({pickup_tag: 3, drop_tag: 6, color: 'blue', label: ''});
+        renderMissionRows();
+    }
+
+    function saveMissions() {
+        const payload = {
+            missions: missionRows,
+            home_tag: parseInt(document.getElementById('missionHomeTag').value) || 12,
+            repeat: document.getElementById('missionRepeat').checked
+        };
+        fetch('/api/missions', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        }).then(r => r.json()).then(data => {
+            document.getElementById('missionList').textContent =
+                data.status === 'ok' ? data.count + ' mission(s) saved!' : 'Error: ' + (data.error || 'unknown');
+        });
+    }
+
+    // Load missions on page load
+    loadMissions();
+    }
+
     function emergencyStop() {
         fetch('/service/emergency_stop', {method: 'POST'});
         stopRobot();
+    }
+
+    function sendGripper(cmd) {
+        fetch('/api/gripper', {method: 'POST', body: JSON.stringify({value: cmd})});
     }
 
     // Velocity control
@@ -832,20 +927,49 @@ def cmd_route(cmd):
 
 @app.route('/velocity', methods=['POST'])
 def velocity_route():
+    # H5/C1: refuser commande manuelle si une mission est active
+    # pour ne pas écraser les commandes mission sur /cmd_vel
+    with state_lock:
+        mission_st = app_state.get('mission_state', {})
+    if mission_st.get('running', False):
+        return jsonify({"status": "blocked",
+                        "reason": "Mission active — arrêtez la mission avant de piloter manuellement"}), 409
     if ros_bridge:
         import json
         data = json.loads(request.data)
         ros_bridge.send_velocity(data.get('linear', 0.0), data.get('angular', 0.0))
     return jsonify({"status": "ok"})
 
+# fonctions _load_robot_config / _save_robot_config / _robot_config_to_esp32_payload
+# définies plus bas dans le fichier (section ROBOT CONFIG GLOBAL)
+
+@app.route('/api/config', methods=['GET'])
+def api_config_get():
+    """Retourne la configuration globale actuelle (robot_config.json)."""
+    cfg = _load_robot_config()
+    return jsonify(cfg if cfg else {"error": "robot_config.json introuvable"})
+
 @app.route('/api/config', methods=['POST'])
 def api_config():
-    """Envoie config PID/trims/rampe au robot via /robot_cfg.
+    """Envoie config PID/trims/rampe au robot via /robot_cfg ET sauvegarde dans robot_config.json.
     Body JSON: {ykp, yki, ykd, ta, tb, ma, mb, rs, rb, rn, reset_odom, save, us_en}"""
     if not ros_bridge:
         return jsonify({"status": "error", "message": "No ROS bridge"})
     data = json.loads(request.data or '{}')
     ros_bridge.send_config(data)
+    # Persister dans la source de vérité globale
+    cfg = _load_robot_config()
+    if data.get("ykp") is not None: cfg.setdefault("pid", {})["kp"]    = data["ykp"]
+    if data.get("yki") is not None: cfg.setdefault("pid", {})["ki"]    = data["yki"]
+    if data.get("ykd") is not None: cfg.setdefault("pid", {})["kd"]    = data["ykd"]
+    if data.get("ta")  is not None: cfg.setdefault("trims", {})["a"]   = data["ta"]
+    if data.get("tb")  is not None: cfg.setdefault("trims", {})["b"]   = data["tb"]
+    if data.get("ma")  is not None: cfg.setdefault("minpwm", {})["a"]  = data["ma"]
+    if data.get("mb")  is not None: cfg.setdefault("minpwm", {})["b"]  = data["mb"]
+    if data.get("rs")  is not None: cfg.setdefault("ramp", {})["speed"]   = data["rs"]
+    if data.get("rb")  is not None: cfg.setdefault("ramp", {})["brake"]   = data["rb"]
+    if data.get("rn")  is not None: cfg.setdefault("ramp", {})["neutral"] = data["rn"]
+    _save_robot_config(cfg)
     return jsonify({"status": "ok", "sent": data})
 
 @app.route('/api/gripper', methods=['POST'])
@@ -872,6 +996,84 @@ def api_mission_ctrl():
     data = json.loads(request.data or '{}')
     ros_bridge.send_mission_ctrl(data)
     return jsonify({"status": "ok", "sent": data})
+
+# ─── ROBOT CONFIG GLOBAL (source de vérité partagée) ───────────────────────
+import os
+_DATA_ROOT   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROBOT_CONFIG_FILE = os.path.join(_DATA_ROOT, "data", "robot_config.json")
+
+def _load_robot_config() -> dict:
+    """Charge robot_config.json. Retourne {} si absent."""
+    try:
+        with open(ROBOT_CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_robot_config(cfg: dict):
+    """Sauvegarde robot_config.json de façon atomique."""
+    try:
+        tmp = ROBOT_CONFIG_FILE + ".tmp"
+        os.makedirs(os.path.dirname(ROBOT_CONFIG_FILE), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        os.replace(tmp, ROBOT_CONFIG_FILE)
+    except Exception as e:
+        print(f"[CFG] Sauvegarde globale échouée: {e}")
+
+def _robot_config_to_esp32_payload(cfg: dict) -> dict:
+    """Convertit robot_config.json en payload JSON pour /robot_cfg (micro-ROS)."""
+    pid    = cfg.get("pid",    {})
+    trims  = cfg.get("trims",  {})
+    minpwm = cfg.get("minpwm", {})
+    ramp   = cfg.get("ramp",   {})
+    return {
+        "ykp": pid.get("kp",  4.0),
+        "yki": pid.get("ki",  0.02),
+        "ykd": pid.get("kd",  0.7),
+        "ta":  trims.get("a",  0.0),
+        "tb":  trims.get("b",  0.0),
+        "ma":  minpwm.get("a", 55.0),
+        "mb":  minpwm.get("b", 55.0),
+        "rs":  ramp.get("speed",   80.0),
+        "rb":  ramp.get("brake",  120.0),
+        "rn":  ramp.get("neutral", 200.0),
+    }
+
+# ─── MISSIONS CONFIG API ──────────────────────────────────────────────────
+MISSIONS_FILE = os.path.join(_DATA_ROOT, "data", "missions", "missions.json")
+
+@app.route('/api/missions', methods=['GET'])
+def api_get_missions():
+    """Retourne la config des missions depuis le JSON."""
+    try:
+        with open(MISSIONS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e), "missions": [], "home_tag": 12, "repeat": True})
+
+@app.route('/api/missions', methods=['POST'])
+def api_set_missions():
+    """Met à jour la config des missions."""
+    try:
+        data = json.loads(request.data or '{}')
+        # Valider la structure
+        if "missions" not in data:
+            return jsonify({"error": "missing 'missions' key"}), 400
+        for m in data["missions"]:
+            if "pickup_tag" not in m or "drop_tag" not in m:
+                return jsonify({"error": "each mission needs 'pickup_tag' and 'drop_tag'"}), 400
+            m.setdefault("color", "blue")
+            m.setdefault("label", f"Pickup {m['pickup_tag']} → Drop {m['drop_tag']}")
+        data.setdefault("home_tag", 12)
+        data.setdefault("repeat", True)
+        os.makedirs(os.path.dirname(MISSIONS_FILE), exist_ok=True)
+        with open(MISSIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return jsonify({"status": "ok", "count": len(data["missions"])})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/reset_odom', methods=['POST'])
 def api_reset_odom():
@@ -929,6 +1131,17 @@ def main():
 
     ros_thread = threading.Thread(target=ros_spinner, daemon=True)
     ros_thread.start()
+
+    # Charger et pousser la config globale vers l'ESP32 au démarrage
+    _gcfg = _load_robot_config()
+    if _gcfg:
+        payload = _robot_config_to_esp32_payload(_gcfg)
+        payload["save"] = 0  # Pas de save EEPROM automatique au boot
+        time.sleep(1.5)      # Laisser le temps au bridge ROS de s'initialiser
+        ros_bridge.send_config(payload)
+        print(f"[CFG] Config globale envoyée à l'ESP32: kp={payload['ykp']} ki={payload['yki']} kd={payload['ykd']} ta={payload['ta']} tb={payload['tb']}")
+    else:
+        print("[CFG] robot_config.json absent — valeurs par défaut du firmware")
 
     # Create Flask server in background
     flask_thread = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True)

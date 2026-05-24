@@ -1,3 +1,23 @@
-opencv-python
-opencv-contrib-python
-numpy
+# Computer Vision
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
+numpy>=1.24.0
+
+# Communication
+pyserial>=3.5
+websocket-client>=1.6.0
+
+# Web / Flask UI (test_PID_auto, flask_ros_bridge)
+flask>=3.0.0
+flask-socketio>=5.3.0
+eventlet>=0.33.0
+
+# Deep RL (Drive Assist)
+torch>=2.0.0
+
+# Plot / visualisation
+matplotlib>=3.7.0
+
+# ROS2 dependencies installed via apt/rosdep:
+#   sudo apt install ros-humble-rclpy ros-humble-std-msgs \
+#                    ros-humble-geometry-msgs ros-humble-sensor-msgs

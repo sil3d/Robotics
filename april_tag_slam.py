@@ -29,7 +29,7 @@ CAMERA_INDEX       = 0
 FRAME_WIDTH        = 640
 FRAME_HEIGHT       = 480
 
-APRILTAG_DICT      = aruco.DICT_APRILTAG_36H11
+APRILTAG_DICT      = cv2.aruco.DICT_4X4_250
 APRILTAG_SIZE_CM   = 10.0
 MAX_DISTANCE_M     = 5.0
 
@@ -191,7 +191,11 @@ def build_T_robot_cam():
 
 class VideoCaptureThread:
     def __init__(self, src=0, width=640, height=480):
-        self.cap = cv2.VideoCapture(src)
+        import sys
+        if sys.platform == 'win32':
+            self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+        else:
+            self.cap = cv2.VideoCapture(src)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_FPS, 30)

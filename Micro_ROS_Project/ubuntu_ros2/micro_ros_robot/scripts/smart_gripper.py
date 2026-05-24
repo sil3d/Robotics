@@ -93,7 +93,7 @@ class SmartGripperController(Node):
 
         # --- Gripper State ---
         self.gripper_state = GripperState.OPEN
-        self.gripper_position = 0.0  # 0 = open, 90 = closed
+        self.gripper_position = 180.0  # 180 = open, 20 = closed
         self.has_box = False
         self.confidence = 1.0
 
@@ -152,17 +152,17 @@ class SmartGripperController(Node):
     def _gripper_feedback_callback(self, msg: Float32):
         """Handle gripper position feedback from ESP32.
 
-        Position in degrees: 0 = fully open, 90 = fully closed
+        Position in degrees: 180 = fully open, 20 = fully closed
         """
         self.gripper_position = msg.data
 
         # Update state based on position feedback
         if self.gripper_state == GripperState.CLOSING:
-            if msg.data > 45:  # Closed position threshold
+            if msg.data < 40:  # Closed position threshold (near 20°)
                 self.gripper_state = GripperState.CLOSED
 
         elif self.gripper_state == GripperState.OPENING:
-            if msg.data < 5:  # Open position threshold
+            if msg.data > 150:  # Open position threshold (near 180°)
                 self.gripper_state = GripperState.OPEN
 
     # =========================================================================

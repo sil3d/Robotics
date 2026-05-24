@@ -1,28 +1,124 @@
 {
+  "arena": {
+    "origin": "HOME center (south wall)",
+    "x_axis": "East (+) / West (-)",
+    "y_axis": "North (+) / South (-)",
+    "units": "cm",
+    "approx_size_cm": "150 x 100",
+    "note": "Initial reference layout. SLAM scan will update real positions."
+  },
   "markers": {
     "1": {
-      "x_cm": 0,
-      "y_cm": 150,
+      "x_cm": -50,
+      "y_cm": 100,
       "z_cm": 0,
-      "description": "Manufacturing station"
+      "wall": "North",
+      "description": "North wall left"
     },
     "2": {
-      "x_cm": 200,
-      "y_cm": 50,
+      "x_cm": 50,
+      "y_cm": 100,
       "z_cm": 0,
-      "description": "Station A"
+      "wall": "North",
+      "description": "North wall right"
     },
     "3": {
       "x_cm": 0,
-      "y_cm": 50,
+      "y_cm": 70,
       "z_cm": 0,
-      "description": "Station B"
+      "wall": null,
+      "description": "Manufacturing station — 30cm from north wall, aligned ID3"
     },
     "4": {
-      "x_cm": 100,
+      "x_cm": -75,
+      "y_cm": 85,
+      "z_cm": 0,
+      "wall": "West",
+      "description": "West wall top"
+    },
+    "5": {
+      "x_cm": 75,
+      "y_cm": 85,
+      "z_cm": 0,
+      "wall": "East",
+      "description": "East wall top"
+    },
+    "6": {
+      "x_cm": 60,
+      "y_cm": 55,
+      "z_cm": 0,
+      "wall": null,
+      "description": "Station B (blue) — 15cm from east wall, aligned ID6"
+    },
+    "7": {
+      "x_cm": -75,
+      "y_cm": 55,
+      "z_cm": 0,
+      "wall": "West",
+      "description": "West wall center-upper"
+    },
+    "8": {
+      "x_cm": 75,
+      "y_cm": 30,
+      "z_cm": 0,
+      "wall": "East",
+      "description": "East wall center-lower"
+    },
+    "9": {
+      "x_cm": -60,
+      "y_cm": 30,
+      "z_cm": 0,
+      "wall": null,
+      "description": "Station A (green) — 15cm from west wall, aligned ID9"
+    },
+    "10": {
+      "x_cm": 75,
+      "y_cm": 5,
+      "z_cm": 0,
+      "wall": "East",
+      "description": "East wall bottom"
+    },
+    "11": {
+      "x_cm": -75,
+      "y_cm": 5,
+      "z_cm": 0,
+      "wall": "West",
+      "description": "West wall bottom"
+    },
+    "12": {
+      "x_cm": 0,
       "y_cm": 0,
       "z_cm": 0,
-      "description": "Home"
+      "wall": null,
+      "description": "HOME — south wall center"
+    }
+  },
+  "stations": {
+    "HOME": {
+      "tag_id": 12,
+      "x_cm": 0,
+      "y_cm": 0,
+      "role": "Start/End point"
+    },
+    "Manufacture": {
+      "tag_id": 3,
+      "x_cm": 0,
+      "y_cm": 70,
+      "role": "Pickup (blue + green cubes)"
+    },
+    "Station_A": {
+      "tag_id": 9,
+      "x_cm": -60,
+      "y_cm": 30,
+      "color": "green",
+      "role": "Drop green cube"
+    },
+    "Station_B": {
+      "tag_id": 6,
+      "x_cm": 60,
+      "y_cm": 55,
+      "color": "blue",
+      "role": "Drop blue cube"
     }
   }
 }

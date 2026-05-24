@@ -195,7 +195,7 @@ class MarkerIdentifier:
 class MarkerCalibrator:
 
     def __init__(self, ref_dir=REFERENCE_DIR):
-        self.aruco_dict   = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+        self.aruco_dict   = aruco.getPredefinedDictionary(aruco.DICT_4X4_250)
         self.aruco_params = aruco.DetectorParameters()
         self.detector     = aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
 

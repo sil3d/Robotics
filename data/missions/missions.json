@@ -1,0 +1,20 @@
+{
+  "missions": [
+    {
+      "id": 1,
+      "pickup_tag": 3,
+      "drop_tag": 6,
+      "color": "blue",
+      "label": "Cube bleu → Station B"
+    },
+    {
+      "id": 2,
+      "pickup_tag": 3,
+      "drop_tag": 9,
+      "color": "green",
+      "label": "Cube vert → Station A"
+    }
+  ],
+  "home_tag": 12,
+  "repeat": true
+}

@@ -18,10 +18,17 @@
  SERIAL (115200) :
    Émission : IMU,yaw,omega,ax,ay,az  (compatible scripts Python AprilTag)
    Réception: commande "R" = reset yaw
+
+ MICRO-ROS CONFIG:
+   Transport: Serial (direct USB connection to Raspberry Pi)
+   Baudrate: 115200
  ===========================================================================
 */
 
 #include <micro_ros_arduino.h>
+
+// Configure micro-ROS transport to Serial (direct USB connection)
+#define MICROROS_SERIAL Serial
 #include <rcl/rcl.h>
 #include <rclc/executor.h>
 #include <rclc/node.h>
@@ -68,15 +75,16 @@
 bool  INVERSER_GAUCHE_DROITE = false;
 float MOTOR_A_TRIM    = 0;
 float MOTOR_B_TRIM    = 0;
-float MOTOR_A_MINPWM  = 35;
-float MOTOR_B_MINPWM  = 35;
+float MOTOR_A_MINPWM  = 55;
+float MOTOR_B_MINPWM  = 55;
 float speedMax        = 255;
 
 // ─── COMMANDE DIRECTION ─────────────────────
 // dirY : -1=arrière, 0=stop, 1=avant
 // dirX : -1=gauche,  0=droit, 1=droite
 float dirX = 0, dirY = 0;
-int   gripperAngle = 90;
+// Gripper: 180° = ouvert, 20° = fermé (saisie)
+int   gripperAngle = 180;
 
 // ─── ODOMÉTRIE ──────────────────────────────
 float posX = 0, posY = 0;
@@ -155,6 +163,8 @@ struct RobotConfig {
   float motor_a_trim, motor_b_trim;
   float motor_a_minpwm, motor_b_minpwm;
   float ramp_speed, ramp_brake, ramp_neutral;
+  float imu_bias_gz;      // Bias gyro Z sauvegardé
+  bool imu_calibrated;    // Flag: true si calibration valide
 };
 
 float getJsonFloat(const char* s, const char* key) {
@@ -171,6 +181,8 @@ void saveConfig() {
   cfg.motor_a_trim    = MOTOR_A_TRIM;  cfg.motor_b_trim   = MOTOR_B_TRIM;
   cfg.motor_a_minpwm  = MOTOR_A_MINPWM; cfg.motor_b_minpwm = MOTOR_B_MINPWM;
   cfg.ramp_speed      = rampSpeed;  cfg.ramp_brake = rampBrake;  cfg.ramp_neutral = rampNeutral;
+  cfg.imu_bias_gz     = bias_gz;
+  cfg.imu_calibrated  = imuReady;  // Sauvegarde uniquement si calibration OK
   EEPROM.put(EEPROM_ADDR, cfg);
   EEPROM.commit();
   Serial.println("[EEPROM] Config sauvegardée");
@@ -184,6 +196,12 @@ bool loadConfig() {
   MOTOR_A_TRIM = cfg.motor_a_trim; MOTOR_B_TRIM = cfg.motor_b_trim;
   MOTOR_A_MINPWM = cfg.motor_a_minpwm; MOTOR_B_MINPWM = cfg.motor_b_minpwm;
   rampSpeed = cfg.ramp_speed; rampBrake = cfg.ramp_brake; rampNeutral = cfg.ramp_neutral;
+  // Charger bias IMU si calibration valide
+  if (cfg.imu_calibrated && abs(cfg.imu_bias_gz) > 0.01f) {
+    bias_gz = cfg.imu_bias_gz;
+    imuReady = true;
+    Serial.printf("[EEPROM] Bias IMU chargé: %.2f (pas de recalibration)\n", bias_gz);
+  }
   yawPID.SetTunings(yawKp, yawKi, yawKd);
   Serial.printf("[EEPROM] Config chargée | PID:%.1f,%.2f,%.1f | Trims:%.0f,%.0f\n",
                 yawKp, yawKi, yawKd, MOTOR_A_TRIM, MOTOR_B_TRIM);
@@ -220,6 +238,9 @@ void calibrateIMU() {
   imuReady = true;
   lastIMUTime = millis();
   Serial.printf("[CALIB] OK — bias gz=%.2f\n", bias_gz);
+  // Sauvegarder pour les prochains démarrages
+  saveConfig();
+  Serial.println("[CALIB] Bias sauvegardé en EEPROM");
 }
 
 void updateIMU() {
@@ -429,8 +450,10 @@ void publishHealth(rcl_timer_t*, int64_t) {
 void cmdVelCallback(const void* msg_in) {
   const geometry_msgs__msg__Twist* msg = (const geometry_msgs__msg__Twist*)msg_in;
   // Convertit Twist (m/s) → dirX/dirY normalisés (-1..1)
-  dirY = constrain(msg->linear.x  / 0.30f, -1.0f, 1.0f);
-  dirX = constrain(msg->angular.z / 2.00f, -1.0f, 1.0f);
+  // Diviseurs alignés sur les limites de navigation_node (max_linear=0.20, max_angular=1.5)
+  // → évite la saturation asymétrique des moteurs lors de commandes combinées
+  dirY = constrain(msg->linear.x  / 0.20f, -1.0f, 1.0f);
+  dirX = constrain(msg->angular.z / 1.50f, -1.0f, 1.0f);
   snprintf(result_buf, sizeof(result_buf), "vel lin=%.2f ang=%.2f",
            msg->linear.x, msg->angular.z);
   result_msg.data.data = result_buf;
@@ -446,11 +469,11 @@ void gripperCallback(const void* msg_in) {
   if (c >= '0' && c <= '9') {
     gripperAngle = atoi(msg->data.data);
   } else if (c == 'o' || c == 'O') {
-    gripperAngle = 0;
+    gripperAngle = 180;   // open
   } else if (c == 'c' || c == 'C') {
-    gripperAngle = 90;
+    gripperAngle = 20;    // close
   }
-  gripperAngle = constrain(gripperAngle, 0, 180);
+  gripperAngle = constrain(gripperAngle, 20, 180);
   gripper.write(gripperAngle);
   snprintf(result_buf, sizeof(result_buf), "gripper=%d", gripperAngle);
   result_msg.data.data = result_buf;
@@ -459,7 +482,7 @@ void gripperCallback(const void* msg_in) {
 }
 
 void cfgCallback(const void* msg_in) {
-  // JSON config: {"ykp":4.0,"yki":0.08,"ykd":0.6,"ta":0,"tb":0,"ma":35,"mb":35,"save":1}
+  // JSON config: {"ykp":4.0,"yki":0.08,"ykd":0.6,"ta":0,"tb":0,"ma":55,"mb":55,"save":1}
   const std_msgs__msg__String* msg = (const std_msgs__msg__String*)msg_in;
   if (!msg->data.data) return;
   const char* s = msg->data.data;
@@ -503,8 +526,13 @@ void setup() {
   setMotorRaw('A', 0); setMotorRaw('B', 0);
 
   // Gripper
-  gripper.attach(SERVO_PIN);
-  gripper.write(gripperAngle);
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+  gripper.setPeriodHertz(50);
+  gripper.attach(SERVO_PIN, 500, 2400);
+  gripper.write(gripperAngle);  // Position initiale: ouvert (180°)
 
   // Ultrasons
   for (int i = 0; i < 4; i++) {
@@ -520,8 +548,14 @@ void setup() {
 
   // IMU
   Serial.println("[TRY] IMU...");
-  if      (bmi160.I2cInit(0x69) == BMI160_OK) { Serial.println("[OK] IMU 0x69"); calibrateIMU(); }
-  else if (bmi160.I2cInit(0x68) == BMI160_OK) { Serial.println("[OK] IMU 0x68"); calibrateIMU(); }
+  if      (bmi160.I2cInit(0x69) == BMI160_OK) { 
+    Serial.println("[OK] IMU 0x69"); 
+    if (!imuReady) calibrateIMU();  // Calibrate seulement si pas déjà chargé EEPROM
+  }
+  else if (bmi160.I2cInit(0x68) == BMI160_OK) { 
+    Serial.println("[OK] IMU 0x68"); 
+    if (!imuReady) calibrateIMU();  // Calibrate seulement si pas déjà chargé EEPROM
+  }
   else Serial.println("[WARN] IMU non trouvée — yaw = 0");
 
   // ─── MICRO-ROS ─────────────────────────────────────────────

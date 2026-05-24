@@ -6,6 +6,8 @@ Station de contrôle multi-plateforme (PC & Raspberry Pi 4B) pour robot différe
 - **PID yaw** pour maintien de cap
 - **IA Deep RL** qui apprend compensation + profil d'accélération optimal
 - **Visualisation trajectoire** temps réel avec Kalman Filter
+- **A* Pathfinding** pour navigation optimale entre les 12 AprilTags
+- **SLAM** (camera + IMU + optical flow) pour localisation absolue
 
 ---
 
@@ -75,15 +77,19 @@ ESP32 ──télémétrie──► PC/Raspberry Pi ──commandes──► ESP3
 ```
 test_PID_auto/
 ├── arduino/
-│   └── arduino.ino          # ESP32: PID + Ultrasons + IMU
+│   └── arduino.ino              # ESP32: PID + Ultrasons + IMU + EEPROM
 ├── templates/
-│   └── index.html           # Interface Web complète
-├── app.py                   # Flask: boucle IA + WebSocket + détection Pi
-├── industrial_ai.py         # UnifiedRLAgent (PC/Pi compatible)
-├── export_rpi.py            # Export modèle TorchScript INT8
-├── import_rpi.py            # Test modèle optimisé
-├── drive_assist_model.pt    # Modèle IA sauvegardé (auto-généré)
+│   └── index.html               # Interface Web complète
+├── app.py                       # Flask: boucle IA + WebSocket + config globale
+├── industrial_ai.py             # UnifiedRLAgent (PC/Pi compatible)
+├── export_rpi.py                # Export modèle TorchScript INT8 (auto depuis Save)
+├── import_rpi.py                # Test modèle optimisé
+├── drive_assist_model.pt        # Modèle IA float32 (auto-généré)
+├── drive_assist_rpi_int8.pt     # Modèle INT8 TorchScript pour Pi (auto-généré au Save)
 └── README.md
+
+# Config globale partagée (hors dossier, dans data/)
+../data/robot_config.json        # Source de vérité unique PID/trims/minPWM/ramp/ia_trims
 ```
 
 ---
@@ -192,7 +198,7 @@ python app.py
 
 ### Réglage PID Yaw
 
-Valeurs de départ: `Kp=4.0, Ki=0.08, Kd=0.6`
+Valeurs de départ: `Kp=4.0, Ki=0.02, Kd=0.7`
 
 | Symptôme | Ajustement |
 |----------|-----------|
@@ -289,11 +295,14 @@ vx = (speed_moteurs × 0.8 + accélération_IMU × 0.2) × cos(yaw)
 ### Détection Plateforme
 
 ```python
-# UnifiedRLAgent détecte automatiquement:
-if 'aarch64' in platform.machine():  # Pi 4B
-    → Mode inférence TorchScript
+# IndustrialRLAgent détecte automatiquement:
+if _is_raspberry_pi():  # ARM / aarch64 / 'raspberry pi' dans /proc/cpuinfo
+    INFERENCE_ONLY = True
+    # → thread d'entraînement désactivé, CPU libéré
+    # → charge drive_assist_model.pt normalement
 else:
-    → Mode entraînement PyTorch
+    INFERENCE_ONLY = False
+    # → thread background training actif
 ```
 
 ### Optimisations Raspberry Pi 4B
@@ -320,6 +329,21 @@ else:
 
 ## 📝 Changelog
 
+### v8.0 — Production Audit Fixes
+- ✅ **PID yaw wrap ±180°** corrigé dans `arduino.ino` (évite correction violente ±360°)
+- ✅ **Firmware scaling** `cmdVelCallback` : diviseurs `0.30→0.20` / `2.00→1.50` (anti-saturation moteur)
+- ✅ **Mode inference-only Pi** : `_is_raspberry_pi()` détecte ARM → thread training désactivé automatiquement
+- ✅ **save_freq** `50→300` (~15s au lieu de 2.5s, réduit l'usure de la SD card)
+
+### v6.0 — Global Config + Auto-Save Pipeline
+- ✅ `data/robot_config.json` — source de vérité unique partagée
+- ✅ Bouton Save = pipeline complet : EEPROM → JSON → .pt → INT8 export
+- ✅ Feedback visuel temps réel de chaque étape dans la console UI
+- ✅ Config chargée automatiquement au démarrage de Flask
+- ✅ `flask_ros_bridge.py` pousse la config au boot vers l'ESP32 micro-ROS
+- ✅ Correction : trims/minPWM ne sont plus écrasés lors de l'envoi PID
+- ✅ Valeurs PID recommandées : Ki 0.08 → 0.02, Kd 0.6 → 0.7
+
 ### v5.0 — Multi-Plateforme + Ultrasons
 - ✅ 4 capteurs ultrasons HC-SR04 (position 45°)
 - ✅ Compatibilité Raspberry Pi 4B (inférence optimisée)
@@ -335,5 +359,5 @@ else:
 ---
 
 **Auteur:** Prince Gildas Mbama Kombila  
-**Version:** 5.0 — Multi-Plateforme Intelligence  
+**Version:** 8.0 — Production Audit  
 **License:** MIT

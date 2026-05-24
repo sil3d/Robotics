@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """
 ===========================================================================
-  MISSION ENGINE — Machine d'états autonome
-  Robot de tri de cubes colorés (bleu / cyan) par AprilTag
+  MISSION ENGINE — Machine d'états autonome avec SLAM + A*
+  Robot de tri de cubes colorés (bleu / vert) par AprilTag
 
-  CYCLE MISSION :
-    IDLE → SCAN_360 → NAVIGATE_TAG → DETECT_CUBE → NAVIGATE_CUBE
-         → OPEN_GRIPPER → APPROACH_CUBE → CLOSE_GRIPPER
-         → NAVIGATE_DROP → RELEASE → RECORD → IDLE
+  LOCALISATION :
+    Camera + IMU (Arduino BMI160) → RobotTracker → position absolue (x, y, yaw)
+    Tags fixés au sol → SLAM scan 360° → carte des 12 tags
+    Optical Flow entre les tags → dead reckoning
+
+  CYCLE MISSION (2 cubes par cycle) :
+    IDLE → SCAN_360 (SLAM carte) → NAVIGATE_WAYPOINT (A* vers Manufacture)
+         → DETECT_CUBE (bleu ou vert) → NAVIGATE_CUBE → APPROACH → CLOSE_GRIPPER
+         → NAVIGATE_WAYPOINT (A* vers Station A/B) → RELEASE
+         → NAVIGATE_WAYPOINT (A* vers Manufacture) → ... (2e cube)
+         → NAVIGATE_WAYPOINT (A* vers HOME) → RECORD → nouveau cycle
+
+  A* PATHFINDING :
+    Graphe complet des 12 tags → chemin le plus court
+    Waypoint par waypoint avec localisation absolue
 
   OBSTACLES :
     - usSpeedLimit géré par le firmware (ralentissement 3→15 cm)
@@ -21,42 +32,53 @@
 ===========================================================================
 """
 
+import json
 import math
 import time
-import json
 import threading
-import numpy as np
 import cv2
-import cv2.aruco as aruco
 import os
+import sys
+import numpy as np
+import heapq
 
 from lstm_assistant import LSTMAssistant
+
+# Add project root and grandparent to path for imports.
+_PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(_PROJECT_DIR)         # Micro_ROS_Project
+ROBOTICS_ROOT = os.path.dirname(PROJECT_ROOT)        # Robotics (racine du repo)
+for _p in (PROJECT_ROOT, ROBOTICS_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from color_detection_test import ColorDetector, ArucoDetector, PROCESS_WIDTH, PROCESS_HEIGHT
+from auto_detetc_tag_arduino import (
+    ArduinoReader,
+    AprilTagDetector,
+    TagMapSLAM,
+    RobotTracker,
+    build_T_robot_cam,
+)
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 # Tags dans l'environnement
 # Structure: {tag_id: {"role": str, "x": float, "y": float}}
-# role: "pickup_blue" | "pickup_cyan" | "drop_blue" | "drop_cyan" | "home"
+# role: "home" | "manufacture" | "drop_blue" | "drop_green"
 TAG_MAP = {
-    1: {"role": "home",        "x": 0.0,  "y": 0.0},
-    2: {"role": "pickup_blue", "x": 1.5,  "y": 0.0},
-    3: {"role": "pickup_cyan", "x": 1.5,  "y": 1.5},
-    4: {"role": "drop_blue",   "x": 0.0,  "y": 1.5},
-    5: {"role": "drop_cyan",   "x": 0.5,  "y": 1.5},
+    12: {"role": "home",         "x": 0.934,  "y": 0.241},
+    3:  {"role": "manufacture",  "x": 1.151,  "y": 0.135},
+    6:  {"role": "drop_blue",    "x": 0.944,  "y": 0.483},   # Station B
+    9:  {"role": "drop_green",   "x": 0.374,  "y": 0.029},   # Station A
 }
 
-# Couleurs cubes (HSV)
-COLOR_RANGES = {
-    "blue": {
-        "lower": np.array([100, 120, 80],  dtype=np.uint8),
-        "upper": np.array([130, 255, 255], dtype=np.uint8),
-    },
-    "cyan": {
-        "lower": np.array([80, 100, 80],   dtype=np.uint8),
-        "upper": np.array([100, 255, 255], dtype=np.uint8),
-    },
-}
+HOME_TAG     = 12
+PICKUP_TAG   = 3
+DROP_TAG     = {"blue": 6, "green": 9}
 
-DROP_TAG = {"blue": 4, "cyan": 5}   # tag de dépôt par couleur
+# Fichier de missions configurable
+MISSIONS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                             "data", "missions", "missions.json")
 
 # Navigation
 NAV_DIST_THRESHOLD  = 0.12   # m — considéré "arrivé" si < cette distance
@@ -67,41 +89,94 @@ NAV_LINEAR_SPEED    = 0.18   # m/s — vitesse navigation
 STOP_DIST_CM        = 8.0    # cm — distance arrêt obstacle (firmware gère < 3cm)
 STUCK_TIMEOUT_S     = 4.0    # s sans avancer = coincé
 
-# Gripper
-GRIPPER_OPEN  = 0
-GRIPPER_CLOSE = 160
+# Gripper: 180° = ouvert, 20° = fermé (saisie)
+GRIPPER_OPEN  = 180
+GRIPPER_CLOSE = 20
+# Distance min pour ouvrir sans écarter la box (cm)
+GRIPPER_SAFE_OPEN_DIST_CM = 15.0
 
-# Calibration caméra
-_CAL_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "camera_calibration", "camera_calibration.json")
-if os.path.exists(_CAL_FILE):
-    with open(_CAL_FILE) as _f:
-        _cal = json.load(_f)
-    CAM_MATRIX  = np.array(_cal["camera_matrix"], dtype=np.float32)
-    DIST_COEFFS = np.array(_cal["dist_coeffs"],   dtype=np.float32)
-    TAG_SIZE_M  = float(_cal.get("apriltag_size_cm", 10.0)) / 100.0
-else:
-    CAM_MATRIX  = np.array([[828, 0, 337], [0, 812, 213], [0, 0, 1]], dtype=np.float32)
-    DIST_COEFFS = np.zeros((1, 5), dtype=np.float32)
-    TAG_SIZE_M  = 0.10
+
+# ─── A* PATHFINDING ──────────────────────────────────────────────────────────
+def _tag_positions_from_map(tag_map):
+    """Construit un dict {tag_id: (x_cm, y_cm)} depuis TagMapSLAM."""
+    return {tid: (t["x"], t["y"]) for tid, t in tag_map.tags.items()}
+
+
+def astar_path(tag_map, start_tid, goal_tid):
+    """
+    A* sur graphe complet de tags.
+    Retourne liste de tag_ids [start, ..., goal] ou [] si pas de chemin.
+    Tous les tags sont connectés entre eux (graphe complet).
+    Poids = distance euclidienne.
+    """
+    if start_tid == goal_tid:
+        return [start_tid]
+
+    positions = _tag_positions_from_map(tag_map)
+    if start_tid not in positions or goal_tid not in positions:
+        return []
+
+    def heuristic(tid_a, tid_b):
+        ax, ay = positions[tid_a]
+        bx, by = positions[tid_b]
+        return math.hypot(ax - bx, ay - by)
+
+    # Graphe complet : chaque tag est connecté à tous les autres
+    open_set = [(heuristic(start_tid, goal_tid), 0.0, start_tid, [start_tid])]
+    visited = set()
+
+    while open_set:
+        f, g, current, path = heapq.heappop(open_set)
+
+        if current == goal_tid:
+            return path
+
+        if current in visited:
+            continue
+        visited.add(current)
+
+        for neighbor in positions:
+            if neighbor in visited:
+                continue
+            cost = heuristic(current, neighbor)
+            new_g = g + cost
+            new_f = new_g + heuristic(neighbor, goal_tid)
+            heapq.heappush(open_set, (new_f, new_g, neighbor, path + [neighbor]))
+
+    return []
+
+
+def path_to_waypoints(tag_map, tag_path):
+    """Convertit une liste de tag_ids en liste de (x_m, y_m)."""
+    positions = _tag_positions_from_map(tag_map)
+    return [(positions[tid][0] / 100.0, positions[tid][1] / 100.0) for tid in tag_path]
 
 
 # ─── ÉTATS ─────────────────────────────────────────────────────────────────────
 class State:
     IDLE            = "IDLE"
-    SCAN_360        = "SCAN_360"        # Rotation sur place, cherche tags + cubes
-    NAVIGATE_TAG    = "NAVIGATE_TAG"    # Va vers un tag pickup
-    DETECT_CUBE     = "DETECT_CUBE"     # Cherche le cube coloré devant lui
-    NAVIGATE_CUBE   = "NAVIGATE_CUBE"   # S'approche du cube détecté
-    OPEN_GRIPPER    = "OPEN_GRIPPER"    # Ouvre la pince
-    APPROACH_CUBE   = "APPROACH_CUBE"   # Avance lentement vers cube
-    CLOSE_GRIPPER   = "CLOSE_GRIPPER"   # Ferme la pince
-    NAVIGATE_DROP   = "NAVIGATE_DROP"   # Va vers zone de dépôt
-    RELEASE         = "RELEASE"         # Ouvre la pince pour lâcher
-    BACK_HOME       = "BACK_HOME"       # Retour au tag home
-    RECORD          = "RECORD"          # Enregistre la trajectoire pour LSTM
-    AVOID           = "AVOID"           # Contourne obstacle
-    STUCK           = "STUCK"           # Coincé — rotation 180°
+    SCAN_360        = "SCAN_360"
+    NAVIGATE_WAYPOINT = "NAVIGATE_WAYPOINT"  # Suivi de chemin A* (waypoints)
+    DETECT_CUBE     = "DETECT_CUBE"
+    NAVIGATE_CUBE   = "NAVIGATE_CUBE"
+    OPEN_GRIPPER    = "OPEN_GRIPPER"
+    APPROACH_CUBE   = "APPROACH_CUBE"
+    CLOSE_GRIPPER   = "CLOSE_GRIPPER"
+    RELEASE         = "RELEASE"
+    RECORD          = "RECORD"
+    AVOID           = "AVOID"
+    STUCK           = "STUCK"
     ERROR           = "ERROR"
+
+
+class _DummyArduino:
+    """Fallback quand l'Arduino n'est pas connecté."""
+    def get(self):
+        return (0.0, 0.0, 0.0, 0.0, 0.0, time.perf_counter())
+    def reset_yaw(self):
+        pass
+    def stop(self):
+        pass
 
 
 class MissionEngine:
@@ -130,9 +205,33 @@ class MissionEngine:
         self._camera_running = False
         self._camera_thread  = None
 
+        # Optimized detectors from color_detection_test.py
+        self.color_detector = ColorDetector()
+        self.aruco_detector = ArucoDetector()
+
+        # ─── Localisation (depuis auto_detetc_tag_arduino.py) ─────────────
+        self.tag_detector = AprilTagDetector()
+        self.tag_map      = TagMapSLAM()
+        self.tag_map.load_prior()  # charge les positions théoriques du plan
+        self.tag_map.load()        # écrase/enrichit avec la carte SLAM sauvegardée
+
+        # Arduino IMU (optionnel — le robot peut fonctionner sans)
+        self.arduino = None
+        try:
+            self.arduino = ArduinoReader()
+            self.log("Arduino IMU connecté")
+        except Exception as e:
+            self.log(f"Arduino non disponible: {e}")
+            self.arduino = _DummyArduino()
+            self.log("Mode sans IMU (yaw = 0)")
+
+        # Tracker : localisation absolue par tags + optical flow + IMU
+        self.tracker = RobotTracker(self.tag_map, self.arduino)
+
         # Mission variables
         self.target_tag_id    = None
-        self.target_color     = None    # "blue" | "cyan"
+        self.target_color     = None    # "blue" | "green"
+        self.drop_tag_id      = None    # tag de dépôt choisi (6 ou 9)
         self.cube_pixel_x     = None    # pixel x du cube dans l'image
         self.cube_dist_cm     = None
         self.scan_start_yaw   = None
@@ -142,7 +241,17 @@ class MissionEngine:
         self.last_odom_y      = None
         self.stuck_timer      = None
         self.avoid_timer      = None
-        self.mission_count    = {"total": 0, "blue": 0, "cyan": 0}
+        self.mission_count    = {"total": 0, "blue": 0, "green": 0}
+
+        # ─── Mission queue & A* pathfinding ─────────────────────────────
+        # Missions chargées depuis data/missions/missions.json
+        self.missions_list     = []    # liste de missions
+        self.missions_repeat   = True  # répéter le cycle
+        self.missions_home_tag = HOME_TAG
+        self.pickup_index      = 0     # index mission courante
+        self.current_path     = []    # chemin A* courant (waypoints en mètres)
+        self.current_path_idx = 0     # waypoint courant dans le path
+        self.cycle_count      = 0     # nombre de cycles complets
 
         # Historique pour LSTM (enregistré à chaque mission)
         self.trajectory_log   = []   # list de {state, odom, us, yaw, action, t}
@@ -161,13 +270,8 @@ class MissionEngine:
         self._config_cb   = lambda cfg: None
         self._log_cb      = lambda msg: print(f"[MISSION] {msg}")
 
-        # Détecteur AprilTag
-        self._tag_dict   = aruco.getPredefinedDictionary(aruco.DICT_APRILTAG_36H11)
-        self._tag_params = aruco.DetectorParameters()
-        self._detector   = aruco.ArucoDetector(self._tag_dict, self._tag_params)
-
         # Caméra locale (optionnelle)
-        self.camera = cv2.VideoCapture(0)
+        self.camera = self._open_camera(0)
         if self.camera.isOpened():
             self._camera_running = True
             self._camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
@@ -204,14 +308,10 @@ class MissionEngine:
         return self.lstm.get_status()
 
     def _hint_to_target(self, hint_target: str):
-        if hint_target == "PICKUP_BLUE":
-            return "blue", 2
-        if hint_target == "PICKUP_CYAN":
-            return "cyan", 3
         if hint_target == "DROP_BLUE":
-            return "blue", 4
-        if hint_target == "DROP_CYAN":
-            return "cyan", 5
+            return "blue", DROP_TAG["blue"]
+        if hint_target == "DROP_GREEN":
+            return "green", DROP_TAG["green"]
         return None, None
 
     def start(self):
@@ -219,7 +319,7 @@ class MissionEngine:
         if self.running:
             return
         if self.camera is None:
-            self.camera = cv2.VideoCapture(0)
+            self.camera = self._open_camera(0)
             if self.camera.isOpened():
                 self._camera_running = True
                 self._camera_thread = threading.Thread(target=self._camera_loop, daemon=True)
@@ -245,7 +345,7 @@ class MissionEngine:
             "state":         self.state,
             "running":       self.running,
             "target_tag":    self.target_tag_id,
-            "target_color":  self.target_color,
+            "target_color":  self.target_color or "none",
             "cube_dist_cm":  self.cube_dist_cm,
             "odom":          self.odom,
             "yaw":           self.yaw_deg,
@@ -254,6 +354,19 @@ class MissionEngine:
             "mission_count": self.mission_count,
             "lstm":          self.lstm.get_status(),
             "lstm_hint":     self._last_lstm_hint,
+            # Localisation SLAM
+            "tracker_x":     self.tracker.x,
+            "tracker_y":     self.tracker.y,
+            "tracker_yaw":   math.degrees(self.tracker.yaw),
+            "tracker_initialized": self.tracker.initialized,
+            "tags_mapped":   len(self.tag_map.tags),
+            "arduino_ok":    not isinstance(self.arduino, _DummyArduino),
+            # A* pathfinding
+            "current_path":  self.current_path,
+            "path_idx":      self.current_path_idx,
+            "missions":      self.missions_list,
+            "pickup_index":  self.pickup_index,
+            "cycle_count":   self.cycle_count,
         }
 
     def update_sensors(self, yaw, omega_z, odom, us, us_limit=1.0):
@@ -291,11 +404,30 @@ class MissionEngine:
         rate = 0.05   # 20 Hz
         while self.running:
             try:
+                # ─── Localisation : met à jour le tracker à chaque tick ───
+                self._update_tracker()
                 self._step()
             except Exception as e:
                 self.log(f"ERREUR état {self.state}: {e}")
                 self._set_state(State.ERROR)
             time.sleep(rate)
+
+    def _update_tracker(self):
+        """Met à jour la position absolue du robot via tags + optical flow + IMU."""
+        frame = self._get_frame()
+        if frame is None:
+            return
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        detections = self.tag_detector.detect(gray)
+        t_now = time.perf_counter()
+        scan = (self.state == State.SCAN_360)
+        self.tracker.update(detections, gray, t_now, scan_mode=scan)
+
+        # Sync odom avec le tracker (en mètres pour le reste du code)
+        self.odom["x"]   = self.tracker.x / 100.0
+        self.odom["y"]   = self.tracker.y / 100.0
+        self.odom["yaw"] = math.degrees(self.tracker.yaw)
+        self.yaw_deg     = math.degrees(self.tracker.yaw)
 
     def _camera_loop(self):
         while self._camera_running and self.camera is not None:
@@ -303,6 +435,29 @@ class MissionEngine:
             if ok and frame is not None:
                 self.update_frame(frame)
             time.sleep(0.03)
+
+    def _open_camera(self, index: int):
+        """Open the local camera with a Linux-friendly backend first.
+
+        On Raspberry Pi / Linux, V4L2 is usually the best option.
+        On Windows, DirectShow is usually faster and more stable.
+        """
+        backends = []
+        if os.name == 'nt':
+            backends = [(cv2.CAP_DSHOW, "DirectShow"), (cv2.CAP_ANY, "Auto")]
+        else:
+            backends = [(cv2.CAP_V4L2, "V4L2"), (cv2.CAP_ANY, "Auto")]
+
+        for backend, name in backends:
+            cap = cv2.VideoCapture(index, backend)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FPS, 30)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.log(f"Caméra locale ouverte ({name})")
+                return cap
+        return cv2.VideoCapture(index)
 
     def _release_camera(self):
         self._camera_running = False
@@ -320,8 +475,8 @@ class MissionEngine:
             self._step_idle()
         elif s == State.SCAN_360:
             self._step_scan()
-        elif s == State.NAVIGATE_TAG:
-            self._step_navigate_tag()
+        elif s == State.NAVIGATE_WAYPOINT:
+            self._step_navigate_waypoint()
         elif s == State.DETECT_CUBE:
             self._step_detect_cube()
         elif s == State.NAVIGATE_CUBE:
@@ -332,12 +487,8 @@ class MissionEngine:
             self._step_approach()
         elif s == State.CLOSE_GRIPPER:
             self._step_close_gripper()
-        elif s == State.NAVIGATE_DROP:
-            self._step_navigate_drop()
         elif s == State.RELEASE:
             self._step_release()
-        elif s == State.BACK_HOME:
-            self._step_back_home()
         elif s == State.RECORD:
             self._step_record()
         elif s == State.AVOID:
@@ -357,97 +508,234 @@ class MissionEngine:
             self._set_state(State.SCAN_360)
 
     def _step_scan(self):
-        """Rotation 360° pour cartographier les tags et détecter les cubes."""
+        """Rotation 360° SLAM : cartographie les tags avec positions absolues."""
         if self.scan_start_yaw is None:
-            self.scan_start_yaw  = self.yaw_deg
+            # Initialisation scan : reset position et yaw
+            self.arduino.reset_yaw()
+            time.sleep(0.1)
+            # M5: clear seulement si aucun tag connu (premier scan ou map vide).
+            # Si des tags sont déjà cartographiés (prior_map), on fusionne pour
+            # ne pas perdre les confirmations précédentes.
+            if not self.tag_map.tags:
+                self.tag_map.tags.clear()
+            self.tracker.reset_to(0.0, 0.0, 0.0)
+            self.scan_start_yaw  = 0.0
             self.scan_turned_deg = 0.0
-            self.log("Scan 360° démarré")
+            self.log("Scan 360° SLAM démarré — tourne lentement")
 
-        # Mesure incrément yaw
-        delta = abs(self._angle_diff(self.yaw_deg, self.scan_start_yaw))
-        self.scan_turned_deg = max(self.scan_turned_deg, delta)
-
+        # Rotation lente
         self.send_velocity(0.0, SCAN_OMEGA)
 
-        # Tentative détection tag pendant le scan
-        tag_id, tag_dist = self._detect_nearest_tag()
-        if tag_id is not None:
-            self.log(f"Tag {tag_id} vu à {tag_dist:.2f}m")
+        # Le tracker est déjà mis à jour en scan_mode par _update_tracker()
+        # Il cartographie automatiquement les tags pendant la rotation
+
+        # Mesure rotation
+        yaw_deg = math.degrees(self.tracker.yaw)
+        delta = abs(self._angle_diff(yaw_deg, self.scan_start_yaw))
+        self.scan_turned_deg = max(self.scan_turned_deg, delta)
 
         if self.scan_turned_deg >= 355.0:
             self.send_velocity(0.0, 0.0)
+
+            # Confirme tous les tags scannés
+            for t in self.tag_map.tags.values():
+                t["views"] = max(t["views"], 3)
+                t["conf"] = 1.0
+
+            self.tag_map.save()
+            self.tracker.initialized = True
+            self.tracker.reset_to(0.0, 0.0, self.tracker.yaw)
+
             self.scan_start_yaw = None
-            self.log("Scan 360° terminé")
-            # Choisir prochaine mission : priorité blue → cyan
+            self.log(f"Scan terminé : {len(self.tag_map.tags)} tags cartographiés")
             self._choose_mission()
 
+    def load_missions(self):
+        """Charge les missions depuis le fichier JSON."""
+        try:
+            with open(MISSIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.missions_list = data.get("missions", [])
+            self.missions_repeat = data.get("repeat", True)
+            self.missions_home_tag = data.get("home_tag", HOME_TAG)
+            self.log(f"Missions chargées : {len(self.missions_list)} missions depuis {MISSIONS_FILE}")
+        except Exception as e:
+            self.log(f"Erreur chargement missions: {e}")
+            # Fallback : missions par défaut
+            self.missions_list = [
+                {"pickup_tag": PICKUP_TAG, "drop_tag": DROP_TAG["blue"], "color": "blue", "label": "Cube bleu → Station B"},
+                {"pickup_tag": PICKUP_TAG, "drop_tag": DROP_TAG["green"], "color": "green", "label": "Cube vert → Station A"},
+            ]
+            self.missions_repeat = True
+            self.missions_home_tag = HOME_TAG
+
     def _choose_mission(self):
-        """Choisit la couleur cible et le tag pickup."""
-        hint = self.lstm.get_latest_hint()
-        hinted_color, hinted_tag = None, None
-        if hint and float(hint.get("confidence", 0.0)) >= self.lstm.confidence_threshold:
-            hinted_color, hinted_tag = self._hint_to_target(str(hint.get("target", "NONE")))
+        """Lance le cycle de mission depuis le fichier de config."""
+        self.pickup_index = 0
+        self.load_missions()
 
-        # Utilise le hint seulement s'il pointe vers un pickup valide.
-        if hinted_color in ("blue", "cyan") and hinted_tag in (2, 3):
-            self.target_color = hinted_color
-            self.target_tag_id = hinted_tag
-            self._last_lstm_hint = hint
-            self.log(f"LSTM hint accepté: {self.target_color} -> tag {self.target_tag_id}")
-        else:
-            self._last_lstm_hint = hint
-            # Alternance blue/cyan pour équilibre
-            if self.mission_count["blue"] <= self.mission_count["cyan"]:
-                self.target_color  = "blue"
-                self.target_tag_id = 2
+        if not self.missions_list:
+            self.log("Aucune mission configurée !")
+            self._set_state(State.IDLE)
+            return
+
+        self.log(f"Cycle : {len(self.missions_list)} missions, repeat={self.missions_repeat}")
+        self._advance_to_next_pickup()
+
+    def _advance_to_next_pickup(self):
+        """Calcule le prochain objectif depuis la liste de missions."""
+        if self.pickup_index >= len(self.missions_list):
+            # Toutes les missions du cycle faites
+            if self.missions_repeat:
+                self.cycle_count += 1
+                self.log(f"Cycle #{self.cycle_count} terminé, restart")
+                self.pickup_index = 0
+                self.load_missions()  # recharge pour avoir les modifs en live
             else:
-                self.target_color  = "cyan"
-                self.target_tag_id = 3
-        self.log(f"Mission : ramasser cube {self.target_color} (tag {self.target_tag_id})")
-        self._set_state(State.NAVIGATE_TAG)
+                self._navigate_to_tag(self.missions_home_tag, "HOME")
+                self._set_state(State.RECORD)
+                return
 
-    def _step_navigate_tag(self):
-        """Navigation vers le tag pickup."""
+        if self.pickup_index >= len(self.missions_list):
+            self.log("Plus de missions → IDLE")
+            self._set_state(State.IDLE)
+            return
+
+        mission = self.missions_list[self.pickup_index]
+        pickup_tag = mission["pickup_tag"]
+        drop_tag = mission["drop_tag"]
+        color = mission.get("color", "blue")
+        label = mission.get("label", f"Mission #{self.pickup_index + 1}")
+
+        # Stocke les infos de la mission courante
+        self.target_color = color
+        self.drop_tag_id = drop_tag
+        self.log(f"Mission : {label}")
+
+        # Aller chercher le cube au pickup
+        self._navigate_to_tag(pickup_tag, f"Pickup → {label}")
+
+    def _navigate_to_tag(self, target_tid, label):
+        """Calcule le chemin A* vers un tag et lance la navigation."""
+        self.target_tag_id = target_tid
+        self.log(f"Mission : {label} → tag {target_tid}")
+
+        current_tid = self._nearest_tag()
+        if current_tid is not None and current_tid != target_tid:
+            tag_path = astar_path(self.tag_map, current_tid, target_tid)
+            self.current_path = path_to_waypoints(self.tag_map, tag_path)
+            self.current_path_idx = 0
+            self.log(f"Chemin A* : {tag_path}")
+        else:
+            tag_info = TAG_MAP.get(target_tid)
+            if tag_info:
+                self.current_path = [(tag_info["x"], tag_info["y"])]
+                self.current_path_idx = 0
+            else:
+                self.current_path = []
+
+        self._set_state(State.NAVIGATE_WAYPOINT)
+
+    def _nearest_tag(self):
+        """Trouve le tag connu le plus proche du robot."""
+        if not self.tag_map.tags:
+            return None
+        rx, ry = self.tracker.x, self.tracker.y  # en cm
+        best_tid = None
+        best_dist = float("inf")
+        for tid, t in self.tag_map.tags.items():
+            d = math.hypot(t["x"] - rx, t["y"] - ry)
+            if d < best_dist:
+                best_dist = d
+                best_tid = tid
+        return best_tid
+
+    def _step_navigate_waypoint(self):
+        """Suit le chemin A* waypoint par waypoint."""
         if self._check_obstacle():
             return
-        tag_info = TAG_MAP.get(self.target_tag_id)
-        if tag_info is None:
-            self._set_state(State.ERROR)
+
+        if not self.current_path or self.current_path_idx >= len(self.current_path):
+            # Chemin terminé — on est arrivé au tag cible
+            self._on_arrived_at_target()
             return
-        arrived, lin, ang = self._navigate_to(tag_info["x"], tag_info["y"])
+
+        # Navigue vers le waypoint courant
+        wx, wy = self.current_path[self.current_path_idx]
+        arrived, lin, ang = self._navigate_to(wx, wy)
+
         if arrived:
-            self.send_velocity(0.0, 0.0)
-            self.log(f"Arrivé au tag {self.target_tag_id}")
-            self._set_state(State.DETECT_CUBE)
+            self.current_path_idx += 1
+            if self.current_path_idx >= len(self.current_path):
+                self._on_arrived_at_target()
+            else:
+                next_wx, next_wy = self.current_path[self.current_path_idx]
+                self.log(f"Waypoint {self.current_path_idx}/{len(self.current_path)} → ({next_wx:.2f}, {next_wy:.2f})")
         else:
             self.send_velocity(lin, ang)
 
+    def _on_arrived_at_target(self):
+        """Appelé quand le robot arrive au tag cible via A*."""
+        self.send_velocity(0.0, 0.0)
+        target = self.target_tag_id
+        self.log(f"Arrivé au tag {target}")
+
+        if target == self.drop_tag_id:
+            # Arrivé à la station → déposer le cube
+            self._set_state(State.RELEASE)
+        elif target == self.missions_home_tag:
+            # Retour à HOME → enregistrer
+            self._save_trajectory()
+            self._advance_to_next_pickup()
+        else:
+            # Arrivé au pickup (ou autre tag) → chercher le cube
+            self._set_state(State.DETECT_CUBE)
+
     def _step_detect_cube(self):
-        """Détection couleur cube dans l'image courante."""
+        """Détection du cube de la couleur définie par la mission."""
         self.send_velocity(0.0, 0.0)
         frame = self._get_frame()
         if frame is None:
             return
 
-        color_range = COLOR_RANGES.get(self.target_color)
-        if color_range is None:
+        # target_color est défini par _advance_to_next_pickup depuis la mission
+        color = self.target_color
+        if color is None:
+            # Fallback : cherche les deux couleurs
+            for c in ("blue", "green"):
+                cx, dist_cm = self._detect_color_cube(frame, c)
+                if cx is not None:
+                    color = c
+                    self.target_color = c
+                    break
+
+        if color is not None:
+            cx, dist_cm = self._detect_color_cube(frame, color)
+            if cx is not None:
+                self.cube_pixel_x = cx
+                self.cube_dist_cm = dist_cm
+                self.log(f"Cube {color} détecté, dist={dist_cm:.1f}cm px={cx}")
+                self._set_state(State.OPEN_GRIPPER)
+                return
+
+        # Aucun cube trouvé — tourne légèrement pour chercher
+        # M4: timeout 15s → ERROR si toujours rien
+        if not hasattr(self, '_detect_cube_start') or self._detect_cube_start is None:
+            self._detect_cube_start = time.perf_counter()
+        if time.perf_counter() - self._detect_cube_start > 15.0:
+            self._detect_cube_start = None
+            self.log("Timeout détection cube (15s) → ERROR")
             self._set_state(State.ERROR)
             return
-
-        cx, dist_cm = self._detect_color_cube(frame, color_range)
-        if cx is not None:
-            self.cube_pixel_x = cx
-            self.cube_dist_cm = dist_cm
-            self.log(f"Cube {self.target_color} détecté, dist={dist_cm:.1f}cm px={cx}")
-            self._set_state(State.OPEN_GRIPPER)
-        else:
-            # Tourne légèrement pour chercher
-            self.send_velocity(0.0, 0.2)
+        self.send_velocity(0.0, 0.2)
 
     def _step_open_gripper(self):
         self.send_velocity(0.0, 0.0)
+        # Ici on ouvre pour aller saisir (180° déjà ouvert → on s'assure juste)
+        # Pas de recul nécessaire : ouverture = bras déjà écartés (180°=ouvert)
         self.send_gripper(GRIPPER_OPEN)
         self.log("Pince ouverte")
+        self._detect_cube_start = None  # reset timeout détection
         time.sleep(0.5)
         self._set_state(State.NAVIGATE_CUBE)
 
@@ -460,8 +748,7 @@ class MissionEngine:
             self.send_velocity(NAV_LINEAR_SPEED * 0.5, 0.0)
             return
 
-        color_range = COLOR_RANGES.get(self.target_color)
-        cx, dist_cm = self._detect_color_cube(frame, color_range)
+        cx, dist_cm = self._detect_color_cube(frame, self.target_color)
 
         if cx is None:
             # Cube perdu — tourne pour retrouver
@@ -494,31 +781,22 @@ class MissionEngine:
         self.send_gripper(GRIPPER_CLOSE)
         self.log("Pince fermée — cube saisi")
         time.sleep(0.6)
-        # Recule légèrement pour dégager
         self.send_velocity(-0.08, 0.0)
         time.sleep(0.8)
         self.send_velocity(0.0, 0.0)
-        self._set_state(State.NAVIGATE_DROP)
-
-    def _step_navigate_drop(self):
-        """Navigation vers la zone de dépôt correspondant à la couleur."""
-        if self._check_obstacle():
-            return
-        drop_tag_id = DROP_TAG.get(self.target_color)
-        drop_info   = TAG_MAP.get(drop_tag_id)
-        if drop_info is None:
-            self._set_state(State.ERROR)
-            return
-        arrived, lin, ang = self._navigate_to(drop_info["x"], drop_info["y"])
-        if arrived:
-            self.send_velocity(0.0, 0.0)
-            self.log(f"Arrivé zone dépôt {self.target_color} (tag {drop_tag_id})")
-            self._set_state(State.RELEASE)
-        else:
-            self.send_velocity(lin, ang)
+        # target_color et drop_tag_id déjà définis par _advance_to_next_pickup
+        self._navigate_to_tag(self.drop_tag_id, f"Drop {self.target_color} (tag {self.drop_tag_id})")
 
     def _step_release(self):
         self.send_velocity(0.0, 0.0)
+        # Reculer avant d'ouvrir si le robot est trop près de la box de dépôt
+        # (évite que les bras du gripper écartent la box en s'ouvrant)
+        front_dist = self.us[0] if self.us[0] > 0 else 999.0
+        if front_dist < GRIPPER_SAFE_OPEN_DIST_CM:
+            self.log(f"Recul avant ouverture gripper (dist={front_dist:.1f}cm < {GRIPPER_SAFE_OPEN_DIST_CM}cm)")
+            self.send_velocity(-0.06, 0.0)
+            time.sleep(0.8)
+            self.send_velocity(0.0, 0.0)
         self.send_gripper(GRIPPER_OPEN)
         self.log(f"Cube {self.target_color} déposé")
         time.sleep(0.5)
@@ -527,33 +805,30 @@ class MissionEngine:
         time.sleep(1.0)
         self.send_velocity(0.0, 0.0)
         self.mission_count["total"] += 1
-        self.mission_count[self.target_color] += 1
-        self._set_state(State.RECORD)
+        color = self.target_color or "blue"
+        self.mission_count[color] += 1
+        self._save_trajectory()
+        # Avancer au prochain pickup du cycle
+        self.pickup_index += 1
+        self._advance_to_next_pickup()
 
-    def _step_back_home(self):
-        if self._check_obstacle():
-            return
-        home = TAG_MAP[1]
-        arrived, lin, ang = self._navigate_to(home["x"], home["y"])
-        if arrived:
-            self.send_velocity(0.0, 0.0)
-            self._set_state(State.RECORD)
-        else:
-            self.send_velocity(lin, ang)
-
-    def _step_record(self):
-        """Sauvegarde la trajectoire pour le LSTM futur."""
+    def _save_trajectory(self):
+        """Sauvegarde la trajectoire pour le LSTM."""
         if self.trajectory_log:
             self.all_trajectories.append(list(self.trajectory_log))
             self.trajectory_log.clear()
         self.log(f"Mission #{self.mission_count['total']} enregistrée "
-                 f"(blue={self.mission_count['blue']}, cyan={self.mission_count['cyan']})")
-        # Relance
+                 f"(blue={self.mission_count['blue']}, green={self.mission_count['green']})")
+
+    def _step_record(self):
+        """Sauvegarde + avance à la prochaine mission."""
+        self._save_trajectory()
         self.target_tag_id = None
         self.target_color  = None
+        self.drop_tag_id   = None
         self.cube_pixel_x  = None
         self.cube_dist_cm  = None
-        self._set_state(State.SCAN_360)
+        self._advance_to_next_pickup()
 
     def _step_avoid(self):
         """Contournement obstacle : tourne jusqu'à dégager."""
@@ -578,10 +853,11 @@ class MissionEngine:
     def _navigate_to(self, tx: float, ty: float):
         """
         Retourne (arrived, linear_speed, angular_speed).
-        Navigation proportionnelle simple cap→avance.
+        Utilise le tracker SLAM pour la position absolue.
         """
-        ox  = self.odom["x"]
-        oy  = self.odom["y"]
+        # Position absolue depuis le tracker (tags + optical flow + IMU)
+        ox  = self.tracker.x / 100.0   # tracker est en cm, navigate en mètres
+        oy  = self.tracker.y / 100.0
         dx  = tx - ox
         dy  = ty - oy
         dist = math.hypot(dx, dy)
@@ -590,7 +866,8 @@ class MissionEngine:
             return True, 0.0, 0.0
 
         target_angle = math.degrees(math.atan2(dy, dx))
-        angle_err    = self._angle_diff(target_angle, self.yaw_deg)
+        yaw_deg = math.degrees(self.tracker.yaw)
+        angle_err = self._angle_diff(target_angle, yaw_deg)
 
         # D'abord aligner, puis avancer
         if abs(angle_err) > NAV_ANGLE_THRESHOLD:
@@ -626,26 +903,25 @@ class MissionEngine:
         with self._cam_lock:
             return self.frame.copy() if self.frame is not None else None
 
-    def _detect_color_cube(self, frame, color_range):
+    def _detect_color_cube(self, frame, target_color):
         """
         Retourne (center_x_pixel, distance_cm) ou (None, None).
-        Distance estimée par la taille du blob dans l'image.
+        target_color: "blue" ou "green"
+        Utilise le détecteur HSV optimisé partagé avec le reste du projet.
         """
-        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, color_range["lower"], color_range["upper"])
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
-                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not cnts:
+        frame_small = cv2.resize(frame, (PROCESS_WIDTH, PROCESS_HEIGHT), interpolation=cv2.INTER_LINEAR)
+        result = self.color_detector.detect(frame_small)
+        if not result:
             return None, None
-        biggest = max(cnts, key=cv2.contourArea)
-        area = cv2.contourArea(biggest)
-        if area < 400:   # trop petit = bruit
+
+        # Cherche le cube de la bonne couleur
+        color_key = "blue" if target_color == "blue" else "green"
+        box = result.get(f"{color_key}_box")
+        if box is None:
             return None, None
-        M  = cv2.moments(biggest)
-        cx = int(M["m10"] / M["m00"])
-        # Estimation distance : cube 5cm, focal ~800px → dist = (5*800)/sqrt(area)
-        dist_cm = (5.0 * 800.0) / max(math.sqrt(area), 1)
+
+        cx = int(box["center_x"])
+        dist_cm = float(box["distance_m"]) * 100.0
         return cx, dist_cm
 
     def _detect_nearest_tag(self):
@@ -653,24 +929,14 @@ class MissionEngine:
         frame = self._get_frame()
         if frame is None:
             return None, None
-        gray   = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = self._detector.detectMarkers(gray)
-        if ids is None:
+        frame_small = cv2.resize(frame, (PROCESS_WIDTH, PROCESS_HEIGHT), interpolation=cv2.INTER_LINEAR)
+        gray = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
+        tags = self.aruco_detector.detect(gray)
+        if not tags:
             return None, None
-        best_id, best_dist = None, float("inf")
-        obj_pts = np.array([
-            [-TAG_SIZE_M/2,  TAG_SIZE_M/2, 0],
-            [ TAG_SIZE_M/2,  TAG_SIZE_M/2, 0],
-            [ TAG_SIZE_M/2, -TAG_SIZE_M/2, 0],
-            [-TAG_SIZE_M/2, -TAG_SIZE_M/2, 0],
-        ], dtype=np.float32)
-        for i, corner in enumerate(corners):
-            _, tvec, _ = cv2.solvePnP(obj_pts, corner[0], CAM_MATRIX, DIST_COEFFS)
-            dist = float(np.linalg.norm(tvec))
-            if dist < best_dist:
-                best_dist = dist
-                best_id   = int(ids[i][0])
-        return best_id, best_dist
+
+        best = min(tags, key=lambda tag: float(tag.get("distance", float("inf"))))
+        return int(best["id"]), float(best["distance"])
 
     # ─── UTILITAIRES ──────────────────────────────────────────────────────────
 
@@ -695,9 +961,8 @@ class MissionEngine:
             State.NAVIGATE_CUBE: 50.0,
             State.APPROACH_CUBE: 60.0,
             State.CLOSE_GRIPPER: 70.0,
-            State.NAVIGATE_DROP: 80.0,
+            State.NAVIGATE_WAYPOINT: 75.0,
             State.RELEASE: 90.0,
-            State.BACK_HOME: 95.0,
             State.RECORD: 100.0,
             State.AVOID: 45.0,
             State.STUCK: 35.0,
@@ -707,14 +972,10 @@ class MissionEngine:
 
     def _record_step(self, action: str):
         """Enregistre un pas pour le LSTM."""
-        if self.state in (State.NAVIGATE_DROP, State.RELEASE):
-            target_label = "DROP_BLUE" if self.target_color == "blue" else "DROP_CYAN" if self.target_color == "cyan" else "NONE"
-        elif self.state == State.BACK_HOME:
-            target_label = "HOME"
-        elif self.target_color == "blue":
-            target_label = "PICKUP_BLUE"
-        elif self.target_color == "cyan":
-            target_label = "PICKUP_CYAN"
+        if self.state in (State.NAVIGATE_WAYPOINT, State.RELEASE):
+            target_label = "DROP_BLUE" if self.target_color == "blue" else "DROP_GREEN" if self.target_color == "green" else "HOME" if self.target_tag_id == HOME_TAG else "NAVIGATE"
+        elif self.target_tag_id == PICKUP_TAG:
+            target_label = "PICKUP"
         else:
             target_label = "NONE"
 
@@ -727,8 +988,9 @@ class MissionEngine:
             "us":     list(self.us),
             "action": action,
             "target": target_label,
-            "target_color": "NONE" if self.target_color is None else str(self.target_color),
+            "target_color": self.target_color or "NONE",
             "target_tag_id": self.target_tag_id,
+            "drop_tag_id": self.drop_tag_id,
             "running": self.running,
             "linear_cmd": self._last_linear_cmd,
             "angular_cmd": self._last_angular_cmd,
@@ -736,7 +998,7 @@ class MissionEngine:
             "cube_pixel_x": self.cube_pixel_x if self.cube_pixel_x is not None else -1.0,
             "color_confidence": 1.0 if self.cube_pixel_x is not None else 0.0,
             "tag_confidence": 1.0 if self.target_tag_id is not None else 0.0,
-            "gripper_state": 1.0 if self._last_gripper_cmd in (GRIPPER_CLOSE, "close", 160) else 0.0,
+            "gripper_state": 1.0 if self._last_gripper_cmd in (GRIPPER_CLOSE, "close", 20) else 0.0,
             "mission_progress": self._mission_progress_percent(),
             "lstm_enabled": self.lstm.enabled,
             "recording_enabled": self.lstm.recording_enabled,

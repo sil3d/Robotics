@@ -24,6 +24,7 @@ import numpy as np
 import time
 import threading
 import json
+import math
 import os
 import sys
 import serial
@@ -35,11 +36,11 @@ from collections import deque
 # CONFIG — AJUSTE CES VALEURS SELON TON SETUP
 # ═══════════════════════════════════════════════════════════════════════════
 
-CAMERA_INDEX       = 0
+CAMERA_INDEX       = 1
 FRAME_WIDTH        = 640
 FRAME_HEIGHT       = 480
 
-APRILTAG_DICT      = aruco.DICT_APRILTAG_36H11
+APRILTAG_DICT     = cv2.aruco.DICT_4X4_250
 APRILTAG_SIZE_CM   = 10.0
 MAX_DISTANCE_M     = 5.0
 
@@ -71,6 +72,33 @@ CAM_PITCH_DEG      = -45.0  # ↓ NÉGATIF = caméra penchée VERS LE BAS
 MIN_TAG_PX_DIAG    = 8
 TAG_CONFIRM_VIEWS  = 3
 MAP_FILE           = os.path.join(os.path.dirname(__file__), "data", "tags_slam", "tags_slam.json")
+
+# ─── PRIOR MAP (plan physique) ───────────────────────────────────────────────
+# Origine = ID12 (Home, mur bas centre)
+# Unités : cm.  X = droite, Y = haut (vue de dessus)
+# Seuil de matching : si le scan donne une position à moins de PRIOR_MATCH_CM
+# de la prior, on pondère avec la prior.  Au-delà, la prior écrase (fausse détection).
+PRIOR_MATCH_CM = 35.0   # cm — tolérance matching scan ↔ prior
+PRIOR_WEIGHT   = 0.65   # poids donné à la prior (0=scan brut, 1=prior pure)
+
+PRIOR_MAP = {
+    #  ID : (x_cm, y_cm, role)
+    #  Source : scan confirmé (12_tags.txt scan 2), recentré sur ID12=(0,0)
+    #  Formule : x = x_scan - 93.4,  y = y_scan - 24.1
+    12: (   0.0,   0.0, "home"),
+    3:  (  21.7, -10.6, "manufacture"),
+    6:  (   1.0,  24.2, "drop_blue"),   # Station B
+    9:  ( -56.0, -21.2, "drop_green"),  # Station A
+    1:  (  27.2,  22.7, "wall"),
+    2:  (  25.0, -54.1, "wall"),
+    4:  (   8.8, -39.9, "wall"),
+    7:  ( -28.6, -13.1, "wall"),
+    8:  ( -33.8,   4.5, "wall"),
+    10: (  -3.3,   6.6, "wall"),
+    11: ( -12.9,  -5.1, "wall"),
+    5:  ( -40.9,   9.2, "wall"),
+    # ID17 volontairement absent → ignoré au scan
+}
 
 # ─── Optical Flow ──────────────────────────────────────────────────────────
 # Conversion pixel → cm au sol (à ajuster si le déplacement semble faux)
@@ -172,7 +200,7 @@ class ArduinoReader:
         print("[ARDUINO] Vérification connexion...")
         start_check = time.time()
         data_received = False
-        while time.time() - start_check < 3.0:
+        while time.time() - start_check < 10.0:  # 10 sec pour ESP32 boot + WiFi + IMU calib
             if self.ser.in_waiting > 0:
                 try:
                     line = self.ser.readline().decode('utf-8', errors='ignore').strip()
@@ -184,7 +212,9 @@ class ArduinoReader:
                     pass
             time.sleep(0.1)
         if not data_received:
-            print("[ARDUINO] ⚠️ Aucune donnée IMU reçue - vérifie le firmware Arduino")
+            print("[ARDUINO] ⚠️ Aucune donnée IMU reçue après 10s - vérifie le firmware Arduino")
+            print("[ARDUINO] L'IMU est-elle bien connectée ? (I2C SDA=21 SCL=22)")
+            print("[ARDUINO] Réessaye en appuyant sur RESET de l'ESP32")
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
@@ -229,16 +259,66 @@ class ArduinoReader:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# AUTO-DÉTECTION CAMÉRA
+# ═══════════════════════════════════════════════════════════════════════════
+
+def find_camera_index(preferred=1, max_index=3):
+    """Trouve une caméra fonctionnelle rapidement.
+    Sur Windows, essaie d'abord DirectShow (cv2.CAP_DSHOW).
+    """
+    print("[CAMERA] Recherche rapide...")
+    
+    # Indices à tester : préféré d'abord, puis 0, 1, 2, 3
+    indices = [preferred] + [i for i in range(max_index + 1) if i != preferred]
+    
+    for cap_idx in indices:
+        # Essayer DirectShow (plus rapide sur Windows)
+        cap = cv2.VideoCapture(cap_idx, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            # Une seule frame suffit
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.size > 0:
+                h, w = frame.shape[:2]
+                print(f"[CAMERA] OK — index {cap_idx} ({w}x{h})")
+                cap.release()
+                return cap_idx
+            cap.release()
+        
+        # Fallback sans backend
+        cap = cv2.VideoCapture(cap_idx)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.size > 0:
+                h, w = frame.shape[:2]
+                print(f"[CAMERA] OK — index {cap_idx} ({w}x{h})")
+                cap.release()
+                return cap_idx
+            cap.release()
+    
+    print("[CAMERA] ⚠️ Aucune caméra trouvée !")
+    return preferred
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # THREAD CAMÉRA (anti-lag buffer USB)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class VideoCaptureThread:
     def __init__(self, src=0, width=640, height=480):
-        self.cap = cv2.VideoCapture(src)
+        # Windows: utiliser DirectShow pour ouverture plus rapide
+        import sys
+        if sys.platform == 'win32':
+            self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+        else:
+            self.cap = cv2.VideoCapture(src)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        # Paramètres par défaut de la caméra
+        # Note: Les réglages spécifiques sont supprimés - on utilise les défauts
+        # car la lumière de la pièce est fixe
         self.ret = False
         self.frame = None
         self.stopped = False
@@ -330,8 +410,19 @@ class AprilTagDetector:
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TagMapSLAM:
-    def __init__(self):
+    def __init__(self, prior_map=None):
         self.tags = {}
+        self.prior = prior_map if prior_map is not None else PRIOR_MAP
+
+    def load_prior(self):
+        """Pre-populates the map with prior positions (conf=0) so scan can match."""
+        for tid, (px, py, role) in self.prior.items():
+            if tid not in self.tags:
+                self.tags[tid] = {
+                    "x": px, "y": py, "z": 0.0, "yaw": 0.0,
+                    "views": 0, "conf": 0.0, "role": role
+                }
+        print(f"[SLAM] Prior chargée : {len(self.prior)} tags connus")
 
     def load(self, path=MAP_FILE):
         if not os.path.exists(path):
@@ -370,10 +461,28 @@ class TagMapSLAM:
         return T
 
     def add_or_update(self, tid, x, y, z, yaw, is_confirmed_view=True):
+        # ── Ancrage prior : si l'ID est connu dans le plan, on pondère ──────
+        if tid in self.prior:
+            px, py, _ = self.prior[tid]
+            dist = math.hypot(x - px, y - py)
+            if dist < PRIOR_MATCH_CM:
+                # Bon match : moyenne pondérée prior + scan
+                x = PRIOR_WEIGHT * px + (1.0 - PRIOR_WEIGHT) * x
+                y = PRIOR_WEIGHT * py + (1.0 - PRIOR_WEIGHT) * y
+            else:
+                # Trop loin de la prior = bruit/fausse déco → on garde la prior
+                x, y = px, py
+                print(f"[SLAM] Tag ID{tid} scan loin prior ({dist:.0f}cm) → prior utilisée")
+        elif tid not in self.tags:
+            # ID totalement inconnu (ni prior, ni carte) → on ignore
+            print(f"[SLAM] Tag ID{tid} inconnu ignoré @ ({x:.1f}, {y:.1f})")
+            return False
+
         if tid not in self.tags:
             self.tags[tid] = {
                 "x": x, "y": y, "z": 0.0, "yaw": yaw,
-                "views": 1, "conf": 0.2
+                "views": 1, "conf": 0.2,
+                "role": self.prior.get(tid, (0, 0, "unknown"))[2]
             }
             print(f"[SLAM] Tag ID{tid} découvert @ ({x:.1f}, {y:.1f})")
             return True
@@ -587,6 +696,9 @@ class RobotTracker:
             self.x, self.y = 0.0, 0.0
             for det in detections:
                 tid = det["tag_id"]
+                # Filtre hard : ignore les IDs absents de la prior
+                if tid not in self.map.prior:
+                    continue
                 tx, ty, tz, tyaw = self._tag_from_pose(det)
                 self.map.add_or_update(tid, tx, ty, tz, tyaw, is_confirmed_view=True)
             return True
@@ -643,12 +755,14 @@ class RobotTracker:
                 self.y += dy
                 self.traj.append((self.x, self.y))
 
-        # ─── 6. CARTOGRAPHIE ───────────────────────────────────────────
-        for det in unknown:
-            tid = det["tag_id"]
-            tx, ty, tz, tyaw = self._tag_from_pose(det)
-            self.map.add_or_update(tid, tx, ty, tz, tyaw,
-                                   is_confirmed_view=self.initialized)
+        # ─── 6. CARTOGRAPHIE (uniquement si localisé) ────────────────
+        # Si pas localisé, la position est fausse → ne pas polluer la carte
+        if localized:
+            for det in unknown:
+                tid = det["tag_id"]
+                tx, ty, tz, tyaw = self._tag_from_pose(det)
+                self.map.add_or_update(tid, tx, ty, tz, tyaw,
+                                       is_confirmed_view=True)
 
         return localized
 
@@ -733,7 +847,7 @@ def draw_map(tracker, expected_tags=0, scan_mode=False,
         f"Robot  X={tracker.x:.1f}  Y={tracker.y:.1f}  Yaw={np.degrees(tracker.yaw):.1f}°",
         f"Tags : {found_confirmed}/{expected_tags} confirmés  ({len(tracker.map.tags)} total)",
         "",
-        "[S] Scan    [E] Fin scan    [W/A/S/D] Manuel    [X] Stop    [Q] Quitter",
+        "[C] Scan    [E] Fin scan    [W/A/S/D] Manuel    [X] Stop    [R] Reset    [Q] Quitter",
     ]
     for i, line in enumerate(lines):
         cv2.putText(img, line, (10, 25 + i * 22),
@@ -758,21 +872,65 @@ def main():
         print(f"[ERREUR] {e}")
         sys.exit(1)
 
-    # 2. Caméra
-    cap = VideoCaptureThread(CAMERA_INDEX, FRAME_WIDTH, FRAME_HEIGHT)
+    # 2. Caméra (auto-détection)
+    cam_idx = find_camera_index(CAMERA_INDEX)
+    cap = VideoCaptureThread(cam_idx, FRAME_WIDTH, FRAME_HEIGHT)
+    
+    # Vérification - le thread a besoin de temps pour démarrer
+    print("[CAMERA] Démarrage thread...")
+    time.sleep(0.8)  # Laisser le thread capturer des frames
+    
+    # Essayer plusieurs lectures
+    test_frame = None
+    for i in range(5):
+        ret, frame = cap.read()
+        if ret and frame is not None:
+            test_frame = frame
+            break
+        time.sleep(0.2)
+    
+    if test_frame is None:
+        print("[ERREUR] Caméra ne répond pas !")
+        print(f"  → Essaye CAMERA_INDEX=0 ou 1")
+        cap.stop()
+        sys.exit(1)
+    
+    print(f"[CAMERA] OK — {test_frame.shape[1]}x{test_frame.shape[0]}")
+    
     detector = AprilTagDetector()
     tag_map = TagMapSLAM()
+    tag_map.load_prior()   # charge les positions théoriques avant le scan
     tracker = RobotTracker(tag_map, arduino)
 
     time.sleep(0.5)
 
-    # 3. Nombre de tags
+    # 3. Nombre de tags (avec timeout 5s, défaut = 4)
     print("\nPlace le robot au CENTRE de la salle.")
-    n_tags = input("Combien de tags as-tu placés ? ").strip()
-    try:
-        expected_tags = int(n_tags)
-    except:
+    print("Combien de tags as-tu placés ? (défaut: 4 dans 5s)")
+    
+    input_result = [None]
+    def read_input():
+        try:
+            input_result[0] = input()
+        except:
+            pass
+    
+    input_thread = threading.Thread(target=read_input)
+    input_thread.daemon = True
+    input_thread.start()
+    input_thread.join(timeout=5.0)  # Attendre max 5 secondes
+    
+    n_tags = input_result[0]
+    if n_tags is None or n_tags.strip() == "":
+        print("[INFO] Utilisation valeur par défaut: 4 tags")
         expected_tags = 4
+    else:
+        try:
+            expected_tags = int(n_tags.strip())
+            print(f"[INFO] {expected_tags} tags attendus")
+        except:
+            expected_tags = 4
+            print("[INFO] Valeur invalide, utilisation défaut: 4 tags")
 
     print(f"\nAppuie sur [S] dans la fenêtre Camera pour démarrer le SCAN.")
     print("Tourne lentement le robot sur 360° (à la main).")
@@ -841,38 +999,51 @@ def main():
             if key == ord('q'):
                 break
 
-            elif key == ord('s') and not scan_mode:
-                # Démarrage scan
+            elif key == ord('c') and not scan_mode:
+                # Démarrage scan [C] = Cartographier
                 scan_mode = True
                 tag_map.tags.clear()
                 tracker.traj.clear()
                 arduino.reset_yaw()
-                time.sleep(0.1)  # laisse l'Arduino reset
+                time.sleep(0.1)
                 tracker.reset_to(0.0, 0.0, 0.0)
                 print("[SCAN] Démarré ! Tourne lentement sur toi-même...")
 
             elif key == ord('e') and scan_mode:
                 # Fin scan manuelle
                 scan_mode = False
+                for t in tag_map.tags.values():
+                    t["views"] = max(t["views"], TAG_CONFIRM_VIEWS)
+                    t["conf"] = 1.0
                 tracker.initialized = True
                 tracker.reset_to(0.0, 0.0, tracker.yaw)
                 print(f"[SCAN] Fin manuelle. {len(tag_map.tags)} tags cartographiés.")
                 print("Tu peux maintenant te déplacer...")
 
-            elif key == ord('w'):
-                man_vx, man_vy, man_omega = MANUAL_SPEED_CM_S, 0.0, 0.0
-            elif key == ord('s'):
-                man_vx, man_vy, man_omega = -MANUAL_SPEED_CM_S, 0.0, 0.0
-            elif key == ord('a'):
-                man_vx, man_vy, man_omega = 0.0, 0.0, MANUAL_TURN_RAD_S
-            elif key == ord('d'):
-                man_vx, man_vy, man_omega = 0.0, 0.0, -MANUAL_TURN_RAD_S
-            elif key == ord('x') or key == ord(' '):
-                man_vx = man_vy = man_omega = 0.0
+            elif key == ord('r') and not scan_mode:
+                # Reset yaw IMU
+                arduino.reset_yaw()
+                tracker.reset_to(0.0, 0.0, 0.0)
+
+            elif not scan_mode:
+                # Mouvement manuel UNIQUEMENT en mode NAV
+                if key == ord('w'):
+                    man_vx, man_vy, man_omega = MANUAL_SPEED_CM_S, 0.0, 0.0
+                elif key == ord('s'):
+                    man_vx, man_vy, man_omega = -MANUAL_SPEED_CM_S, 0.0, 0.0
+                elif key == ord('a'):
+                    man_vx, man_vy, man_omega = 0.0, 0.0, MANUAL_TURN_RAD_S
+                elif key == ord('d'):
+                    man_vx, man_vy, man_omega = 0.0, 0.0, -MANUAL_TURN_RAD_S
+                elif key == ord('x') or key == ord(' '):
+                    man_vx = man_vy = man_omega = 0.0
 
             # Auto-fin scan si tous les tags trouvés
             if scan_mode and len(tag_map.tags) >= expected_tags:
                 scan_mode = False
+                for t in tag_map.tags.values():
+                    t["views"] = max(t["views"], TAG_CONFIRM_VIEWS)
+                    t["conf"] = 1.0
                 tracker.initialized = True
                 tracker.reset_to(0.0, 0.0, tracker.yaw)
                 print(f"[SCAN] Auto-fin ! {len(tag_map.tags)} tags trouvés.")

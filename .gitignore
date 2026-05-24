@@ -1,0 +1,79 @@
+# ─── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Virtual environments ───────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+.env
+.env.local
+.env.*.local
+
+# ─── ML / IA artifacts (lourds, regenerable) ────────────
+*.pt
+*.pth
+*.onnx
+*.pkl
+*.h5
+test_PID_auto/drive_assist_model.pt
+test_PID_auto/drive_assist_rpi_int8.pt
+
+# ─── Logs & runtime ─────────────────────────────────────
+*.log
+*.tmp
+*.cache
+*.swp
+*.swo
+12_tags.txt
+
+# ─── ROS2 build output ──────────────────────────────────
+build/
+install/
+log/
+
+# ─── IDE / éditeurs ─────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+*.sublime-*
+
+# ─── OS ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Backups ────────────────────────────────────────────
+*.bak
+*_backup.*
+*_old.*
+* copy.*
+*.orig
+
+# ─── 3D CAO files (lourds, à mettre en LFS si besoin) ───
+3D/
+*.STEP
+*.step
+*.stp
+*.IGS
+*.igs
+
+# ─── Documents binaires ────────────────────────────────
+*.pdf
+
+# ─── Calibration sortie ────────────────────────────────
+data/marker_map_auto/*.json
+!data/marker_map_auto/.gitkeep
+
+# ─── Atomique tmp ──────────────────────────────────────
+*.json.tmp

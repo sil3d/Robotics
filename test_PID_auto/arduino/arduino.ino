@@ -48,11 +48,12 @@ const char* password = "robot1234";
 bool INVERSER_GAUCHE_DROITE = false;
 float MOTOR_A_TRIM = 0;
 float MOTOR_B_TRIM = 0;
-float MOTOR_A_MINPWM = 35;
-float MOTOR_B_MINPWM = 35;
+float MOTOR_A_MINPWM = 55;
+float MOTOR_B_MINPWM = 55;
 float speedMax = 255;
 float dirX = 0, dirY = 0;
-int gripperAngle = 90;
+// Gripper: 180° = ouvert, 20° = fermé (saisie)
+int gripperAngle = 180;
 
 // ── ODOMÉTRIE ──
 float posX = 0, posY = 0;
@@ -105,6 +106,8 @@ UltrasonicSensor usSensors[4] = {
   {US3_TRIG, US3_ECHO, 0, false, 0},
   {US4_TRIG, US4_ECHO, 0, false, 0}
 };
+const uint8_t NUM_US_SENSORS = sizeof(usSensors) / sizeof(usSensors[0]);
+const float SOUND_SPEED = 0.0343;
 bool usEnabled = true;  // Activation/désactivation globale
 float usSpeedLimit = 1.0;  // 1.0 = pleine vitesse, 0.0 = arrêt
 
@@ -149,6 +152,8 @@ struct RobotConfig {
   float ramp_speed, ramp_brake, ramp_neutral;
   float ia_trim_L, ia_trim_R;
   float ia_ramp_mult;
+  float imu_bias_gz;      // Bias gyro Z sauvegardé
+  bool imu_calibrated;    // Flag: true si calibration valide
 };
 
 void saveConfig() {
@@ -160,6 +165,8 @@ void saveConfig() {
   cfg.ramp_speed = rampSpeed; cfg.ramp_brake = rampBrake; cfg.ramp_neutral = rampNeutral;
   cfg.ia_trim_L = iaCorr.trim_L; cfg.ia_trim_R = iaCorr.trim_R;
   cfg.ia_ramp_mult = iaRampMultiplier;
+  cfg.imu_bias_gz = bias_gz;
+  cfg.imu_calibrated = imuReady;  // Sauvegarde uniquement si calibration OK
   
   EEPROM.put(EEPROM_ADDR, cfg);
   EEPROM.commit();
@@ -177,6 +184,13 @@ bool loadConfig() {
   rampSpeed = cfg.ramp_speed; rampBrake = cfg.ramp_brake; rampNeutral = cfg.ramp_neutral;
   iaCorr.trim_L = cfg.ia_trim_L; iaCorr.trim_R = cfg.ia_trim_R;
   iaRampMultiplier = cfg.ia_ramp_mult;
+  
+  // Charger bias IMU si calibration valide
+  if (cfg.imu_calibrated && abs(cfg.imu_bias_gz) > 0.01) {
+    bias_gz = cfg.imu_bias_gz;
+    imuReady = true;
+    Serial.printf("[EEPROM] Bias IMU chargé: %.2f (pas de recalibration)\n", bias_gz);
+  }
   
   yawPID.SetTunings(yawKp, yawKi, yawKd);
   Serial.printf("[EEPROM] Config chargée | trims IA: L=%.1f R=%.1f | ramp_mult: %.2f\n",
@@ -200,6 +214,9 @@ void calibrateIMU() {
   imuReady = true;
   lastIMUTime = millis();
   Serial.printf("[CALIB] OK — bias gz=%.2f\n", bias_gz);
+  // Sauvegarder pour les prochains démarrages
+  saveConfig();
+  Serial.println("[CALIB] Bias sauvegardé en EEPROM");
 }
 
 void updateIMU() {
@@ -228,94 +245,92 @@ void updateIMU() {
 // ═══════════════════════════════════════════════════════════════
 // ULTRASONS — Lecture des 4 capteurs
 // ═══════════════════════════════════════════════════════════════
-float readUltrasonic(uint8_t trigPin, uint8_t echoPin) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  
-  long duration = pulseIn(echoPin, HIGH, 25000);  // Timeout 25ms (~4m max)
-  if (duration == 0) return -1;  // Pas de réponse
-  float distance = (duration * 0.0343) / 2.0;
-  return (distance > US_MAX_DISTANCE) ? -1 : distance;
-}
+// Machine à états non-bloquante pour les ultrasons
+// Chaque appel avance d'une étape — aucun delay()
+// Cycle complet : 4 capteurs × ~60ms = ~240ms
+enum class UsState : uint8_t { IDLE, TRIG, WAIT_ECHO, READ };
 
 void updateUltrasonics() {
-  if (!usEnabled) {
-    usSpeedLimit = 1.0;  // Pleine vitesse quand désactivé
-    return;
-  }
-  
-  static uint8_t currentSensor = 0;
-  static unsigned long lastUSRead = 0;
-  
+  if (!usEnabled) { usSpeedLimit = 1.0; return; }
+
+  static UsState       state       = UsState::IDLE;
+  static uint8_t       idx         = 0;
+  static unsigned long stateStart  = 0;
+  static bool          wasLimited  = false;
+
   unsigned long now = millis();
-  if (now - lastUSRead < 60) return;  // Cycle ~60ms entre capteurs
-  lastUSRead = now;
-  
-  UltrasonicSensor& us = usSensors[currentSensor];
-  float dist = readUltrasonic(us.trigPin, us.echoPin);
-  
-  if (dist >= 0) {
-    us.distance = dist;
-    us.responding = true;
-    us.lastUpdate = now;
-  } else {
-    // Timeout - capteur ne répond pas
-    if (now - us.lastUpdate > 1000) us.responding = false;
-  }
-  
-  // === CORRECTION: Calculer la limite avec TOUS les capteurs de la direction ===
-  // US1, US2 = AVANT (45°) | US3, US4 = ARRIÈRE (45°)
-  bool isMovingForward = (dirY > 0.1);
-  bool isMovingBackward = (dirY < -0.1);
-  
-  if (isMovingForward || isMovingBackward) {
-    float minObstacleDist = 999.0;
-    bool hasObstacle = false;
-    
-    // Sélectionner les capteurs selon la direction
-    int startIdx = isMovingForward ? 0 : 2;
-    int endIdx = isMovingForward ? 2 : 4;
-    
-    for (int i = startIdx; i < endIdx; i++) {
-      if (usSensors[i].responding && usSensors[i].distance > 0) {
-        minObstacleDist = min(minObstacleDist, usSensors[i].distance);
-        hasObstacle = true;
-      }
-    }
-    
-    // Zone de ralentissement: 3cm à 15cm
-    if (hasObstacle) {
-      if (minObstacleDist < 3.0) {
-        usSpeedLimit = 0.05;  // 5% vitesse max
-      } else if (minObstacleDist < 15.0) {
-        usSpeedLimit = 0.05 + (minObstacleDist - 3.0) / 12.0 * 0.95;
+
+  switch (state) {
+
+    case UsState::IDLE:
+      // Attendre 50ms avant de démarrer le prochain capteur (anti-interférence echo)
+      if (now - stateStart < 50) return;
+      idx = (idx + 1) % NUM_US_SENSORS;
+      // Envoyer l'impulsion TRIG
+      digitalWrite(usSensors[idx].trigPin, LOW);
+      delayMicroseconds(2);
+      digitalWrite(usSensors[idx].trigPin, HIGH);
+      delayMicroseconds(10);
+      digitalWrite(usSensors[idx].trigPin, LOW);
+      stateStart = now;
+      state = UsState::WAIT_ECHO;
+      break;
+
+    case UsState::WAIT_ECHO: {
+      // Lire l'écho de façon non-bloquante via pulseIn avec timeout minimal
+      // pulseIn est ici acceptable car son timeout = 30ms max et c'est le seul appel bloquant
+      // → on l'isole dans cet état pour que les autres états (IMU, moteurs) ne soient pas affectés
+      long duration = pulseIn(usSensors[idx].echoPin, HIGH, 30000);
+      if (duration > 0) {
+        float dist = (duration * SOUND_SPEED) / 2.0;
+        if (dist <= US_MAX_DISTANCE) {
+          usSensors[idx].distance   = dist;
+          usSensors[idx].responding = true;
+          usSensors[idx].lastUpdate = now;
+        }
       } else {
-        usSpeedLimit = 1.0;
+        // Pas de réponse
+        if (now - usSensors[idx].lastUpdate > 1000) usSensors[idx].responding = false;
       }
-      
-      // Log si on entre en zone de ralentissement
-      static bool wasLimited = false;
+      stateStart = now;
+      state = UsState::IDLE;
+
+      // Recalculer usSpeedLimit après chaque capteur lu
+      bool isMovingForward  = (dirY >  0.1);
+      bool isMovingBackward = (dirY < -0.1);
+
+      if (!isMovingForward && !isMovingBackward) { usSpeedLimit = 1.0; break; }
+
+      int startIdx = isMovingForward ? 0 : 2;
+      int endIdx   = isMovingForward ? 2 : 4;
+
+      float minDist   = 999.0;
+      bool  hasActive = false;
+      for (int i = startIdx; i < endIdx; i++) {
+        if (usSensors[i].responding && usSensors[i].distance > 0) {
+          if (usSensors[i].distance < minDist) minDist = usSensors[i].distance;
+          hasActive = true;
+        }
+      }
+
+      if (!hasActive) { usSpeedLimit = 1.0; break; }
+
+      if      (minDist < 3.0)  usSpeedLimit = 0.05;
+      else if (minDist < 15.0) usSpeedLimit = 0.05 + (minDist - 3.0) / 12.0 * 0.95;
+      else                     usSpeedLimit = 1.0;
+
       bool isLimited = (usSpeedLimit < 0.95);
-      if (isLimited && !wasLimited) {
-        const char* dir = isMovingForward ? "devant" : "derrière";
-        Serial.printf("[US] Ralentissement - Obstacle %s à %.1f cm (limite: %d%%)\n", 
-                      dir, minObstacleDist, (int)(usSpeedLimit * 100));
-      } else if (!isLimited && wasLimited) {
-        Serial.println("[US] Zone libre - Pleine vitesse");
-      }
+      if (isLimited && !wasLimited)
+        Serial.printf("[US] Obstacle %s à %.1f cm → %d%%\n",
+                      isMovingForward ? "devant" : "derrière", minDist, (int)(usSpeedLimit * 100));
+      else if (!isLimited && wasLimited)
+        Serial.println("[US] Zone libre");
       wasLimited = isLimited;
-    } else {
-      usSpeedLimit = 1.0;
+      break;
     }
-  } else {
-    // Arrêté ou changement de direction → reset immédiat de la limite
-    usSpeedLimit = 1.0;
+
+    default: state = UsState::IDLE; break;
   }
-  
-  currentSensor = (currentSensor + 1) % 4;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -386,10 +401,16 @@ void updateMotors() {
     Serial.println("[YAW] Déverrouillage");
   }
   
-  // ── PID Yaw ──
+  // ── PID Yaw (wrap-safe) ──
+  // On calcule l'erreur wrappée dans [-180,+180] et on passe l'erreur
+  // comme input autour d'un setpoint=0, évitant le saut ±360° lors du
+  // passage de la frontière ±180°.
   if (yawLocked) {
-    yawSetpoint = lockedYaw;
-    yawInput = yaw;
+    float rawErr = lockedYaw - yaw;
+    while (rawErr >  180.0f) rawErr -= 360.0f;
+    while (rawErr < -180.0f) rawErr += 360.0f;
+    yawSetpoint = 0.0;
+    yawInput    = -rawErr;   // PID minimise (input - setpoint) = -rawErr → corr = +rawErr
     yawPID.Compute();
   }
   
@@ -482,14 +503,28 @@ void parseMessage(String &msg) {
     dirX = getF(msg, "\"x\":"); dirY = getF(msg, "\"y\":");
   }
   else if (msg.indexOf("\"t\":\"cfg\"") >= 0) {
-    yawKp = getF(msg, "\"ykp\":"); yawKi = getF(msg, "\"yki\":"); yawKd = getF(msg, "\"ykd\":");
-    if (yawKp > 0) yawPID.SetTunings(yawKp, yawKi, yawKd);
-    MOTOR_A_TRIM = getF(msg, "\"ta\":"); MOTOR_B_TRIM = getF(msg, "\"tb\":");
-    MOTOR_A_MINPWM = getF(msg, "\"ma\":"); MOTOR_B_MINPWM = getF(msg, "\"mb\":");
-    
-    float rs = getF(msg, "\"rs\":"); if (rs > 10) rampSpeed = rs;
-    float rb = getF(msg, "\"rb\":"); if (rb > 10) rampBrake = rb;
-    float rn = getF(msg, "\"rn\":"); if (rn > 10) rampNeutral = rn;
+    if (msg.indexOf("\"ykp\":") >= 0) yawKp = getF(msg, "\"ykp\":");
+    if (msg.indexOf("\"yki\":") >= 0) yawKi = getF(msg, "\"yki\":");
+    if (msg.indexOf("\"ykd\":") >= 0) yawKd = getF(msg, "\"ykd\":");
+    yawPID.SetTunings(yawKp, yawKi, yawKd);
+
+    if (msg.indexOf("\"ta\":") >= 0) MOTOR_A_TRIM = getF(msg, "\"ta\":");
+    if (msg.indexOf("\"tb\":") >= 0) MOTOR_B_TRIM = getF(msg, "\"tb\":");
+    if (msg.indexOf("\"ma\":") >= 0) MOTOR_A_MINPWM = getF(msg, "\"ma\":");
+    if (msg.indexOf("\"mb\":") >= 0) MOTOR_B_MINPWM = getF(msg, "\"mb\":");
+
+    if (msg.indexOf("\"rs\":") >= 0) {
+      float rs = getF(msg, "\"rs\":");
+      if (rs > 10) rampSpeed = rs;
+    }
+    if (msg.indexOf("\"rb\":") >= 0) {
+      float rb = getF(msg, "\"rb\":");
+      if (rb > 10) rampBrake = rb;
+    }
+    if (msg.indexOf("\"rn\":") >= 0) {
+      float rn = getF(msg, "\"rn\":");
+      if (rn > 10) rampNeutral = rn;
+    }
     
     Serial.printf("[CFG] PID:%.1f,%.2f,%.1f | Trims:%.0f,%.0f | MinPWM:%.0f,%.0f | Rampe:%.0f,%.0f,%.0f\n",
                   yawKp, yawKi, yawKd, MOTOR_A_TRIM, MOTOR_B_TRIM, MOTOR_A_MINPWM, MOTOR_B_MINPWM,
@@ -522,6 +557,7 @@ void parseMessage(String &msg) {
   else if (msg.indexOf("\"t\":\"save\"") >= 0) saveConfig();
   else if (msg.indexOf("\"t\":\"grip\"") >= 0) {
     gripperAngle = (int)getF(msg, "\"a\":");
+    gripperAngle = constrain(gripperAngle, 20, 180);
     gripper.write(gripperAngle);
   }
   else if (msg.indexOf("\"t\":\"us\"") >= 0) {
@@ -559,7 +595,13 @@ void setup() {
   ledcAttach(MA_EN, 30000, 8); ledcAttach(MB_EN, 30000, 8);
   Serial.println("[OK] Moteurs");
   
-  gripper.attach(SERVO_PIN); gripper.write(gripperAngle);
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+  gripper.setPeriodHertz(50);
+  gripper.attach(SERVO_PIN, 500, 2400);
+  gripper.write(gripperAngle);  // Position initiale: ouvert (180°)
   Serial.println("[OK] Gripper");
 
   // Init ultrasons
@@ -579,12 +621,18 @@ void setup() {
   }
 
   Serial.println("[TRY] IMU...");
-  if (bmi160.I2cInit(0x69) == BMI160_OK) { Serial.println("[OK] IMU 0x69"); calibrateIMU(); }
-  else if (bmi160.I2cInit(0x68) == BMI160_OK) { Serial.println("[OK] IMU 0x68"); calibrateIMU(); }
+  if (bmi160.I2cInit(0x69) == BMI160_OK) { 
+    Serial.println("[OK] IMU 0x69"); 
+    if (!imuReady) calibrateIMU();  // Calibrate seulement si pas déjà chargé EEPROM
+  }
+  else if (bmi160.I2cInit(0x68) == BMI160_OK) { 
+    Serial.println("[OK] IMU 0x68"); 
+    if (!imuReady) calibrateIMU();  // Calibrate seulement si pas déjà chargé EEPROM
+  }
   else { Serial.println("[WARN] IMU non trouvée"); }
 
   WiFi.softAP(ssid, password);
-  Serial.print("[OK] WiFi AP: "); Serial.println(WiFi.softAPIP());
+  Serial.printf("[OK] WiFi AP: %s | IP: %s | MDP: %s\n", ssid, WiFi.softAPIP().toString().c_str(), password);
 
   ws.onEvent(onWs); server.addHandler(&ws); server.begin();
   Serial.println("[OK] WebServer");

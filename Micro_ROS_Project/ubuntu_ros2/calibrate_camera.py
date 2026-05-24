@@ -46,7 +46,7 @@ SQUARE_SIZE_CM     = 2.0    # physical size of one square in cm
 
 # AprilTag parameters (used as alternative/verification marker)
 USE_APRILTAG      = True
-APRILTAG_DICT     = aruco.DICT_APRILTAG_36H11
+APRILTAG_DICT     = cv2.aruco.DICT_4X4_250
 APRILTAG_SIZE_CM  = 10.0    # physical tag side length in cm
 
 # Calibration thresholds

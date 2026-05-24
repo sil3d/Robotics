@@ -27,13 +27,10 @@ and mission management.
 6.  [Project Structure](#6-project-structure)
 7.  [ROS2 Topics and Messages](#7-ros2-topics-and-messages)
 8.  [Node Descriptions](#8-node-descriptions)
-9.  [Calibration](#9-calibration)
-10. [Web Interface (Flask)](#10-web-interface-flask)
+9.  [Web Interface (Flask-ROS Bridge)](#9-web-interface-flask-ros-bridge)
+10. [Calibration](#10-calibration)
 11. [Troubleshooting](#11-troubleshooting)
 12. [Development](#12-development)
-13. [Enhanced Features (v2.0)](#13-enhanced-features-v20)
-14. [New Topics and Services](#14-new-topics-and-services)
-15. [File Structure (v2.0)](#15-file-structure-v20)
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## 1. PROJECT OVERVIEW
@@ -44,27 +41,30 @@ and mission management.
 This project implements an autonomous mobile robot for warehouse operations using
 a distributed computing architecture based on ROS2 and micro-ROS.
 
-The robot performs the following mission:
-1. Start from **Home** position
-2. Navigate to **Manufacturing Station**
-3. Detect box color (red or green)
-4. Pick up the box using a gripper mechanism
-5. Deliver to correct storage:
-   - **Red box** → Storage A (x=0, y=1.5)
-   - **Green box** → Storage B (x=1.5, y=1.5)
-6. Return to **Home** position
+The robot performs the following mission (2 cubes per cycle):
+1. Start from **Home** position (tag 12)
+2. **SLAM Scan 360°** — cartographie les 12 AprilTags (positions absolues)
+3. Navigate to **Manufacturing Station** (tag 3) via **A* pathfinding**
+4. Detect box color (blue or green)
+5. Pick up the box using a gripper mechanism
+6. Deliver to correct station via A*:
+   - **Blue cube** → Station B (tag 6)
+   - **Green cube** → Station A (tag 9)
+7. Return to Manufacture for **2nd cube** (opposite color)
+8. Deliver 2nd cube to the other station
+9. Return to **Home** via A*
 
 ### 1.2 Key Features
 
 | Feature | Implementation |
 |---------|----------------|
 | Distributed Architecture | ESP32 (low-level) + Raspberry Pi (high-level) |
-| Communication | ROS2 + micro-ROS over UDP |
-| Localization | AprilTag visual markers + IMU fusion |
-| Navigation | PID waypoint following |
-| Color Detection | HSV-based red/green detection |
+| Communication | ROS2 + micro-ROS over Serial (USB direct) |
+| Localization | AprilTag SLAM (camera + IMU + optical flow) |
+| Navigation | A* pathfinding (graphe complet 12 tags) |
+| Color Detection | HSV-based blue/green detection |
 | Gripper Control | Servo-based mechanical gripper |
-| Web Interface | Flask debug dashboard (port 5000) |
+| Web Interface | Flask-ROS Bridge with command panels (port 5000) |
 
 ### 1.3 Technical Specifications
 
@@ -75,38 +75,40 @@ The robot performs the following mission:
 | IMU Update Rate | 50 Hz |
 | Ultrasonic Update Rate | 5 Hz |
 | Camera Resolution | 640x480 |
-| AprilTag Family | 36h11 |
+| AprilTag Family | 4x4_250 |
 | AprilTag Size | 10 cm |
+| Tag Count | 12 markers |
+| Pathfinding | A* (graphe complet) |
 
 ### 1.4 Environment Layout
 
 ```
-    Y (meters)
+    Y (cm) — North (+)
     │
-    │   ┌──────────────────────────────┐
-    │   │                              │
-    │   │    Storage B    Storage A    │
-    │   │    (1.5, 1.5)    (0, 1.5)    │
-    │   │        ●──────────●          │
-    │   │        │          │          │
-    │   │        │          │          │
-    │   │        │          │          │
-    │   │        │          │          │
-    │   │   MFG──●          │          │
-    │   │  (1.5, 0)         │          │
-    │   │        │          │          │
-    │   │        │          │          │
-    │   │   Home●───────────●──────────│
-    │   │  (0,0)                    X   │
-    │   └──────────────────────────────┘
-    └─────────────────────────────────────
+    100  Tag1(-50,100)   Tag3(0,70)    Tag2(50,100)
+    │      ●                ● MFG          ●
+    │      │   Tag4(-75,85)  │  Tag5(75,85)│
+    │      ●  ┌────────────────────────┐  ●
+    │  Tag7   │                        │  Tag6(60,55)
+    55   ●    │                        │  ● Station B
+    │         │       Tag12(0,0)       │   (blue)
+    │  Tag9   │    Station A (green)   │  Tag8
+    30   ●    │    ●                   │  ●
+    │  SA     │                        │  (75,30)
+    │  (-60)  │                        │
+    │  Tag11  │        HOME ●          │  Tag10
+    5    ●    │        (0,0)           │  ●
+    │         └────────────────────────┘
+    0  ──────────────────────────────────── X (cm)
+       -75    -50    -25     0    25    50    75
+                                  West(-)   East(+)
 ```
 
-**Station Coordinates:**
-- Home: (0.0, 0.0, 0.0)
-- Manufacturing (MFG): (1.5, 0.0, 0.0)
-- Storage A (Red box): (0.0, 1.5, 0.0)
-- Storage B (Green box): (1.5, 1.5, 0.0)
+**Station Coordinates (HOME origin, X+ East, Y+ North):**
+- Home (tag 12): (0, 0) cm
+- Manufacturing (tag 3): (0, 70) cm — 30cm from north wall, aligned ID3
+- Station B — Blue (tag 6): (60, 55) cm — 15cm from east wall, aligned ID6
+- Station A — Green (tag 9): (-60, 30) cm — 15cm from west wall, aligned ID9
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## 2. SYSTEM ARCHITECTURE
@@ -121,13 +123,13 @@ The robot performs the following mission:
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                    CAMERA_NODE                                  │   │
 │  │  • Captures frames from USB camera                              │   │
-│  │  • Detects AprilTag 36h11 markers                               │   │
+│  │  • Detects AprilTag 4x4_250 markers                              │   │
 │  │  • Estimates 6DOF pose for each marker                         │   │
-│  │  • Performs HSV color detection (red/green)                     │   │
+│  │  • Performs HSV color detection (blue/green)                     │   │
 │  │                                                                 │   │
 │  │  PUBLISHES:                                                     │   │
 │  │    → /aruco_detections (geometry_msgs/PoseArray)                │   │
-│  │    → /box_color (std_msgs/String) "red"/"green"/"none"         │   │
+│  │    → /box_color (std_msgs/String) "blue"/"green"/"none"        │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                 │                                      │
 │                                 ▼                                      │
@@ -172,15 +174,23 @@ The robot performs the following mission:
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                   FLASK_ROS_BRIDGE                                │   │
+│  │  • Web UI for robot control (http://localhost:5000)              │   │
+│  │  • Bridges HTTP requests to ROS2 topics                         │   │
+│  │  • Command panels: Quick, Gripper, Mission, Motor                │   │
+│  │  • Subscribes to telemetry topics for UI display                 │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                   MICRO_ROS_AGENT                                │   │
 │  │  • Bridges ESP32 micro-ROS messages to ROS2                      │   │
-│  │  • UDP server on port 8888                                      │   │
+│  │  • Serial transport on /dev/ttyUSB0 (115200 baud)                │   │
 │  │  • Receives /imu_data, /ultrasonic_data from ESP32              │   │
 │  │  • Publishes /cmd_vel, /gripper_cmd to ESP32                    │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
                                   │
-                                  │ UDP (port 8888)
+                                  │ Serial (USB /dev/ttyUSB0)
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                              ESP32 (micro-ROS)                          │
@@ -247,94 +257,65 @@ The robot performs the following mission:
             └──────────┘    └───────────┘  └───────────┘
 ```
 
-### 2.3 State Machine
+### 2.3 State Machine (A* + SLAM)
 
 ```
                     ┌─────────────────┐
-                    │                 │
-                    │     IDLE       │◄──────────────────────┐
-                    │                 │                       │
-                    │  Waiting for    │                       │
-                    │  /start_task    │                       │
-                    │                 │                       │
-                    └────────┬────────┘                       │
-                             │                                │
-                             │ /start_task                    │
-                             ▼                                │
-                    ┌─────────────────┐                       │
-                    │                 │                       │
-                    │   GO_TO_MFG     │──────────────────────►│
-                    │                 │   (cancel)            │
-                    │  Navigate to    │                       │
-                    │  MFG station    │                       │
-                    │                 │                       │
-                    └────────┬────────┘                       │
-                             │                                │
-                             │ waypoint reached              │
-                             ▼                                │
-                    ┌─────────────────┐                       │
-                    │                 │                       │
-                    │  DETECT_COLOR   │──────────────────────►│
-                    │                 │   (cancel)           │
-                    │  Camera detects │                       │
-                    │  red or green   │                       │
-                    │                 │                       │
-                    └────────┬────────┘                       │
-                             │                                │
-                             │ color detected                │
-                             ▼                                │
-                    ┌─────────────────┐                       │
-                    │                 │                       │
-                    │   PICK_BOX      │──────────────────────►│
-                    │                 │   (cancel)           │
-                    │  Close gripper  │                       │
-                    │  (grab box)     │                       │
-                    │                 │                       │
-                    └────────┬────────┘                       │
-                             │                                │
-                             │ gripper closed                 │
-                             ▼                                │
-                    ┌─────────────────┐                       │
-                    │                 │                       │
-                    │  GO_TO_STORAGE  │──────────────────────►│
-                    │                 │   (cancel)           │
-                    │  Navigate to:   │                       │
-                    │  Storage A=red   │                       │
-                    │  Storage B=green │                       │
-                    │                 │                       │
-                    └────────┬────────┘                       │
-                             │                                │
-                             │ waypoint reached              │
-                             ▼                                │
-                    ┌─────────────────┐                       │
-                    │                 │                       │
-                    │  DEPOSIT_BOX    │──────────────────────►│
-                    │                 │   (cancel)           │
-                    │  Open gripper   │                       │
-                    │  (release box)  │                       │
-                    │                 │                       │
-                    └────────┬────────┘                       │
-                             │                                │
-                             │ box deposited                 │
-                             ▼                                │
-                    ┌─────────────────┐                       │
-                    │                 │                       │
-                    │  RETURN_HOME    │──────────────────────►│
-                    │                 │   (cancel)           │
-                    │  Navigate to    │                       │
-                    │  Home position  │                       │
-                    │                 │                       │
-                    └────────┬────────┘                       │
-                             │                                │
-                             │ home reached                  │
-                             ▼                                │
-                    ┌─────────────────┐                       │
-                    │                 │                       │
-                    │ TASK_COMPLETE  │───────────────────────┘
-                    │                 │   (auto-return to IDLE)
-                    │  Mission done!  │
-                    │                 │
-                    └─────────────────┘
+                    │     IDLE       │
+                    └────────┬────────┘
+                             │ start
+                             ▼
+                    ┌─────────────────┐
+                    │   SCAN_360      │  ← SLAM: tourne 360°, cartographie les 12 tags
+                    └────────┬────────┘
+                             │ scan complete
+                             ▼
+                    ┌─────────────────┐
+                    │ NAVIGATE_WAYPOINT│  ← A* pathfinding: suit le chemin waypoint par waypoint
+                    │ (→ Manufacture) │
+                    └────────┬────────┘
+                             │ arrived at Manufacture (tag 3)
+                             ▼
+                    ┌─────────────────┐
+                    │  DETECT_CUBE    │  ← Détecte cube bleu ou vert
+                    └────────┬────────┘
+                             │ cube found
+                             ▼
+                    ┌─────────────────┐
+                    │ NAVIGATE_CUBE   │  ← Aligne et avance vers le cube
+                    │ OPEN → APPROACH │
+                    │ CLOSE_GRIPPER   │  ← Attrape le cube
+                    └────────┬────────┘
+                             │ cube grabbed
+                             ▼
+                    ┌─────────────────┐
+                    │ NAVIGATE_WAYPOINT│  ← A* vers Station B (bleu) ou Station A (vert)
+                    │ (→ Station)     │
+                    └────────┬────────┘
+                             │ arrived at station
+                             ▼
+                    ┌─────────────────┐
+                    │    RELEASE      │  ← Dépose le cube
+                    └────────┬────────┘
+                             │ cube deposited
+                             ▼
+                    ┌─────────────────┐
+                    │ NAVIGATE_WAYPOINT│  ← A* vers Manufacture (2ème cube)
+                    │ (→ Manufacture) │
+                    └────────┬────────┘
+                             │ ... 2ème cube same flow ...
+                             ▼
+                    ┌─────────────────┐
+                    │ NAVIGATE_WAYPOINT│  ← A* vers HOME (tag 12)
+                    │ (→ HOME)        │
+                    └────────┬────────┘
+                             │ arrived at HOME
+                             ▼
+                    ┌─────────────────┐
+                    │    RECORD       │  ← Sauvegarde trajectoire pour LSTM
+                    └────────┬────────┘
+                             │ new cycle
+                             └──► NAVIGATE_WAYPOINT (Manufacture)
 ```
 
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -634,16 +615,19 @@ Otherwise, follow the calibration procedure in Section 9.
 
 ### 4.4 Network Configuration
 
-ESP32 and Raspberry Pi must be on the same network. The micro-ROS agent
-communicates via UDP on port 8888.
+ESP32 is connected directly to Raspberry Pi via USB for micro-ROS Serial communication.
+This provides faster and more reliable communication than WiFi/UDP.
 
 ```
-┌─────────────┐         ┌─────────────────┐         ┌─────────────┐
-│   ESP32     │◄───────►│     Network      │◄───────►│ Raspberry Pi│
-│  (WiFi/ETH) │  UDP    │   (Router)       │  UDP    │  (ROS2)     │
-│  Port 8888  │         │                  │  Port 8888 │
-└─────────────┘         └─────────────────┘         └─────────────┘
+┌─────────────┐         ┌─────────────────┐
+│   ESP32     │◄───────►│ Raspberry Pi    │
+│  (USB)      │ Serial │  (ROS2)         │
+│  /dev/ttyUSB0│115200  │  /dev/ttyUSB0   │
+└─────────────┘         └─────────────────┘
 ```
+
+**Note:** The ESP32 firmware is configured for Serial transport (not UDP).
+No network configuration is required.
 
 ## ═══════════════════════════════════════════════════════════════════════════
 ## 5. RUNNING THE ROBOT
@@ -652,18 +636,35 @@ communicates via UDP on port 8888.
 ### 5.1 Quick Start
 
 ```bash
-# Terminal 1: Start micro-ROS agent
-source /opt/ros/humble/setup.bash
-source ~/micro_ros_ws/install/setup.bash
-ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888
+# Connect ESP32 to Raspberry Pi via USB (/dev/ttyUSB0)
+# Then run the launch script
+cd ~/ros2_ws/src/micro_ros_robot/ubuntu_ros2
+chmod +x launch_micro_ros.sh
+./launch_micro_ros.sh
 
-# Terminal 2: Launch all robot nodes
-source /opt/ros/humble/setup.bash
-source ~/micro_ros_ws/install/setup.bash
-ros2 launch micro_ros_robot robot_bringup.launch.py
+# The script will:
+# 1. Start micro-ROS agent on Serial (/dev/ttyUSB0)
+# 2. Launch Flask-ROS Bridge (UI at http://localhost:5000)
+# 3. Open browser for robot control
 ```
 
-### 5.2 Launch File Options
+### 5.2 Manual Launch (Advanced)
+
+```bash
+# Terminal 1: Start micro-ROS agent (Serial mode)
+source /opt/ros/humble/setup.bash
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200
+
+# Terminal 2: Launch Flask-ROS Bridge
+cd ~/ros2_ws/src/micro_ros_robot/ubuntu_ros2
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+python3 flask_ros_bridge.py
+
+# Open browser at http://localhost:5000
+```
+
+### 5.3 Launch File Options
 
 The launch file starts all nodes with default parameters. To customize:
 
@@ -780,7 +781,7 @@ Micro_ROS_Project/
 |-------|--------------|-----------|------|-------------|
 | `/image_raw` | sensor_msgs/Image | internal | 30Hz | Camera frames |
 | `/aruco_detections` | geometry_msgs/PoseArray | camera_node → localization | 30Hz | Detected tag poses |
-| `/box_color` | std_msgs/String | camera_node → task_manager | 30Hz | "red"/"green"/"none" |
+| `/box_color` | std_msgs/String | camera_node → task_manager | 30Hz | "blue"/"green"/"none" |
 | `/robot_pose` | geometry_msgs/Pose | localization → navigation | 20Hz | Robot (x,y,theta) |
 | `/cmd_vel` | geometry_msgs/Twist | navigation → ESP32 | 20Hz | Velocity commands |
 | `/waypoint` | geometry_msgs/Point | task_manager → navigation | event | Target position |
@@ -840,7 +841,7 @@ w: 0.0           # Right sensor (cm), -1 = no reading (stored in z for legacy)
 
 #### /box_color (std_msgs/String)
 ```yaml
-data: "red"      # "red", "green", or "none"
+data: "blue"     # "blue", "green", or "none"
 ```
 
 ## ═══════════════════════════════════════════════════════════════════════════
@@ -867,15 +868,15 @@ data: "red"      # "red", "green", or "none"
 5. Convert rotation vector to quaternion
 6. Publish pose array
 7. Perform HSV color detection in center ROI
-8. Publish color ("red"/"green"/"none")
+8. Publish color ("blue"/"green"/"none")
 
 **AprilTag Configuration:**
-- Dictionary: DICT_APRILTAG_36H11
+- Dictionary: DICT_4X4_250
 - Physical size: 10cm (configurable)
 - Detection threshold: adjustable in DetectorParameters
 
 **Color Detection (HSV):**
-- Red: H: 0-10, S: 100-255, V: 100-255
+- Blue (cyan): H: 100-130, S: 80-255, V: 80-255
 - Green: H: 40-80, S: 50-255, V: 50-255
 - Threshold: 500+ pixels to confirm detection
 
@@ -901,49 +902,43 @@ data: "red"      # "red", "green", or "none"
 4. Use IMU yaw for orientation correction
 5. Apply low-pass filter to smooth pose
 
-**Marker Map Configuration:**
+**Marker Map Configuration (12 tags — HOME origin, X+ East, Y+ North):**
 ```yaml
 marker_map:
-  '0': [0.0, 0.0, 0.0]    # Home
-  '1': [1.5, 0.0, 0.0]    # Manufacturing
-  '2': [0.0, 1.5, 0.0]    # Storage A
-  '3': [1.5, 1.5, 0.0]    # Storage B
+  '12': [0, 0, 0]        # HOME (south wall center)
+  '3':  [0, 70, 0]       # Manufacture (north, 30cm from wall)
+  '6':  [60, 55, 0]      # Station B — blue (east, 15cm from wall)
+  '9':  [-60, 30, 0]     # Station A — green (west, 15cm from wall)
+  '1':  [-50, 100, 0]    # North wall left
+  '2':  [50, 100, 0]     # North wall right
+  '4':  [-75, 85, 0]     # West wall top
+  '5':  [75, 85, 0]      # East wall top
+  '7':  [-75, 55, 0]     # West wall center-upper
+  '8':  [75, 30, 0]      # East wall center-lower
+  '10': [75, 5, 0]       # East wall bottom
+  '11': [-75, 5, 0]      # West wall bottom
 ```
 
 ### 8.3 navigation_node
 
-**Purpose:** Navigate robot to waypoints using PID control.
+**Purpose:** Navigate robot to waypoints using **A* pathfinding** + SLAM localization.
 
 **Inputs:**
-- `/robot_pose` - Current robot position
+- `/robot_pose` - Current robot position (from SLAM tracker)
 - `/waypoint` - Target waypoint from task manager
 
 **Outputs:**
 - `/cmd_vel` - Velocity commands to ESP32
 
-**PID Controller:**
-
-For linear velocity (forward/backward):
-- Kp: 2.0 (proportional gain)
-- Ki: 0.1 (integral gain)
-- Kd: 0.5 (derivative gain)
-
-For angular velocity (turn):
-- Kp: 3.0
-- Ki: 0.2
-- Kd: 1.0
-
 **Algorithm:**
-1. Compute distance to waypoint: d = √((x_w - x_r)² + (y_w - y_r)²)
-2. Compute angle to waypoint: θ = atan2(y_w - y_r, x_w - x_r)
-3. Compute relative angle: φ = θ - robot_yaw (normalized to [-π, π])
-4. If angle error > 30°, stop and rotate (don't move forward)
-5. Compute angular velocity using PID: ω = PID(0, φ)
-6. Compute linear velocity using PID: v = PID(0, d)
-7. Publish velocity command
+1. Build graph of 12 tags (complete graph, weight = Euclidean distance)
+2. Compute A* shortest path from nearest tag to target tag
+3. Follow waypoints one by one with PID control
+4. Localize absolutely when a tag is visible (camera + IMU fusion)
+5. Use optical flow for dead reckoning between tags
+6. Apply obstacle avoidance from ultrasonic data
 
-**Waypoint threshold:** 0.15 meters (waypoint considered reached)
-**Angle threshold:** 0.2 radians (for final orientation)
+**Waypoint threshold:** 0.12 meters
 
 ### 8.4 task_manager_node
 
@@ -951,13 +946,14 @@ For angular velocity (turn):
 
 **States:**
 1. IDLE - Waiting for start command
-2. GO_TO_MFG - Navigate to manufacturing station
-3. DETECT_COLOR - Wait for camera to detect box color
-4. PICK_BOX - Close gripper to grab box
-5. GO_TO_STORAGE - Navigate to correct storage (A or B)
-6. DEPOSIT_BOX - Open gripper to release box
-7. RETURN_HOME - Navigate back to home position
-8. TASK_COMPLETE - Mission finished
+2. SCAN_360 - SLAM scan, cartographie les 12 tags
+3. NAVIGATE_WAYPOINT - A* pathfinding vers la cible
+4. DETECT_CUBE - Détecte cube bleu ou vert
+5. NAVIGATE_CUBE / OPEN / APPROACH / CLOSE_GRIPPER - Pickup
+6. NAVIGATE_WAYPOINT - A* vers station de dépôt
+7. RELEASE - Ouvre la pince
+8. RECORD - Sauvegarde trajectoire LSTM
+9. Cycle recommence (2 cubes par cycle)
 
 **Inputs:**
 - `/box_color` - Detected color from camera_node
@@ -974,16 +970,109 @@ For angular velocity (turn):
 
 **Mission Sequence:**
 ```
-start_task → GO_TO_MFG → DETECT_COLOR → PICK_BOX
-           → GO_TO_STORAGE (A or B based on color)
-           → DEPOSIT_BOX → RETURN_HOME → TASK_COMPLETE → IDLE
+start → SCAN_360 (SLAM)
+      → NAVIGATE_WAYPOINT (A* → Manufacture) → DETECT_CUBE
+      → NAVIGATE_CUBE → OPEN → APPROACH → CLOSE_GRIPPER
+      → NAVIGATE_WAYPOINT (A* → Station B or A) → RELEASE
+      → NAVIGATE_WAYPOINT (A* → Manufacture) → [2nd cube]
+      → NAVIGATE_WAYPOINT (A* → HOME) → RECORD → new cycle
 ```
 
 ## ═══════════════════════════════════════════════════════════════════════════
-## 9. CALIBRATION
+## 9. WEB INTERFACE (FLASK-ROS BRIDGE)
 ## ═══════════════════════════════════════════════════════════════════════════
 
-### 9.1 Camera Calibration
+### 9.1 Overview
+
+The Flask-ROS Bridge provides a web-based UI for robot control and monitoring.
+It bridges HTTP requests from the browser to ROS2 topics.
+
+**Access:** http://localhost:5000
+
+### 9.2 UI Panels
+
+**Video Streams**
+- Robot Map: 2D visualization of robot position and ultrasonic readings
+- IMU 3D: 3D visualization of accelerometer orientation
+- Camera Feed: Live camera feed with AprilTag overlays
+
+**Status Panels**
+- Robot Mode: NORMAL/DEGRADED/FAULT/ABORT
+- Sensor Health: IMU, AprilTag, Ultrasonics status
+- Localization Confidence: Bar showing pose estimation confidence
+- Box Info: Detected color, orientation, distance, dimensions
+- Gripper: State (open/closed), has_box status
+- Mission: Task state, target color/tag, LSTM status, mission progress
+
+**Command Panels**
+
+**Quick Commands**
+- Calibrate Gripper
+- Start Scan
+- Reset Recovery
+- Reset Odom
+- EMERGENCY STOP
+
+**Gripper Control**
+- Open / Close
+- 0° / 90° preset angles
+
+**Mission Control**
+- Start Mission
+- Stop Mission
+- Toggle LSTM (enable/disable)
+
+**Motor Control**
+- FWD / BACK (linear velocity)
+- LEFT / RIGHT (angular velocity)
+- STOP (emergency stop)
+
+### 9.3 API Endpoints
+
+**Velocity Control**
+```bash
+POST /velocity
+Content-Type: application/json
+{"linear": 0.2, "angular": 0.5}
+```
+
+**Gripper Control**
+```bash
+POST /api/gripper
+Content-Type: application/json
+{"value": "open"}  # or "close", "0", "90"
+```
+
+**Services**
+```bash
+POST /service/calibrate_gripper
+POST /service/start_scan
+POST /service/emergency_stop
+POST /service/reset_recovery
+POST /service/start_task
+POST /service/cancel_task
+POST /service/reset_odom
+```
+
+**Telemetry**
+```bash
+GET /state
+Returns: JSON with IMU, ultrasonics, robot mode, box info, etc.
+```
+
+### 9.4 Telemetry Display
+
+The UI updates telemetry in real-time via polling:
+- IMU: Yaw (deg), Omega Z (deg/s), Accel X/Y/Z
+- Ultrasonics: Front/Back/Left/Right distances (cm)
+- Robot Pose: X, Y, Theta
+- Mission State: Current state, target, LSTM status
+
+## ═══════════════════════════════════════════════════════════════════════════
+## 10. CALIBRATION
+## ═══════════════════════════════════════════════════════════════════════════
+
+### 10.1 Camera Calibration
 
 Camera calibration is required for accurate AprilTag pose estimation.
 The calibration script `calibrate_camera.py` uses chessboard pattern.
@@ -1256,7 +1345,7 @@ ros2 topic echo /imu_data --format csv > data.csv
 
 To add markers to the environment:
 
-1. Print AprilTag 36h11 markers
+1. Print AprilTag 4x4_250 markers
 2. Measure marker positions in world frame
 3. Update marker_map in localization_node parameters
 
@@ -1347,7 +1436,7 @@ Camera now detects box orientation (horizontal/vertical):
 ```bash
 # Watch box info
 ros2 topic echo /box_info
-# {"color": "red", "orientation": "horizontal", "distance": 0.45, "confidence": 0.8}
+# {"color": "blue", "orientation": "horizontal", "distance": 0.45, "confidence": 0.8}
 ```
 
 ### 13.6 Confidence-Weighted Localization
@@ -1419,6 +1508,6 @@ Micro_ROS_Project/
 ## ═══════════════════════════════════════════════════════════════════════════
 
 **Project:** Micro-ROS Autonomous Mobile Robot
-**Version:** 2.0.0
+**Version:** 6.0.0
 **Date:** May 2026
 **License:** MIT

@@ -23,12 +23,12 @@ from collections import deque
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
-CAMERA_INDEX       = 0
+CAMERA_INDEX       = 1
 FRAME_WIDTH        = 640
 FRAME_HEIGHT       = 480
 TARGET_FPS         = 30
 
-APRILTAG_DICT      = aruco.DICT_APRILTAG_36H11
+APRILTAG_DICT     = cv2.aruco.DICT_4X4_250
 APRILTAG_SIZE_CM   = 10.0
 
 # ─── INTRINSÈQUES — chargées depuis data/camera_calibration/camera_calibration.json ─────────────────
@@ -48,7 +48,6 @@ else:
     DIST_COEFFS = np.array([[-1.436, 14.760, -0.00570, 0.0543, -37.111]], dtype=np.float32)
 
 MAX_DISTANCE_M     = 5.0
-ENABLE_CONTRAST    = True
 MIN_TAG_PX_DIAG    = 8       # ↓ plus permissif (avant 12)
 PREDICT_LOST_MS    = 500     # garde la pose 500ms après disparition
 
@@ -58,7 +57,11 @@ PREDICT_LOST_MS    = 500     # garde la pose 500ms après disparition
 # ─────────────────────────────────────────────────────────────────────────────
 class VideoCaptureThread:
     def __init__(self, src=0, width=640, height=480):
-        self.cap = cv2.VideoCapture(src)
+        import sys
+        if sys.platform == 'win32':
+            self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+        else:
+            self.cap = cv2.VideoCapture(src)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
@@ -128,12 +131,6 @@ class AprilTagPoseEstimator:
         self.history = {}   # {tid: {"q": deque, "last_seen": t, "last_pose": {...}}}
         self.max_dist_cm = MAX_DISTANCE_M * 100.0
 
-    def _preprocess(self, gray):
-        if not ENABLE_CONTRAST:
-            return gray
-        # ~0.3 ms, booste le contraste local sans tuer le CPU
-        return cv2.convertScaleAbs(gray, alpha=1.25, beta=-15)
-
     @staticmethod
     def _rvec_to_euler(rvec):
         R, _ = cv2.Rodrigues(rvec)
@@ -149,8 +146,7 @@ class AprilTagPoseEstimator:
         return np.array([x, y, z])
 
     def detect(self, gray, t_now):
-        proc = self._preprocess(gray)
-        corners, ids, rejected = self.detector.detectMarkers(proc)
+        corners, ids, rejected = self.detector.detectMarkers(gray)
         seen_ids = set()
 
         # ─── Prédiction : on garde les tags récemment vus même si absents ──

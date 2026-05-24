@@ -18,6 +18,7 @@ It receives:
 """
 
 import json
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -58,13 +59,33 @@ class TaskManagerNode(Node):
         self._odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self._us_limit = 1.0
 
+        # C3/M3: buffer IMU brut — màj à chaque callback, flush vers engine à 20 Hz
+        self._imu_yaw_raw   = 0.0
+        self._imu_omega_raw = 0.0
+        self._last_imu_flush = time.perf_counter()
+        self._IMU_FLUSH_INTERVAL = 0.05  # 20 Hz
+
         self.create_timer(0.1, self._publish_state)
         self.get_logger().info("TaskManagerNode ready")
 
     def _imu_cb(self, msg: Accel):
+        # M3: stocker seulement, flush à 20 Hz dans _flush_imu_to_engine
+        self._imu_yaw_raw   = float(msg.linear.x)
+        self._imu_omega_raw = float(msg.linear.y)
+        now = time.perf_counter()
+        if now - self._last_imu_flush >= self._IMU_FLUSH_INTERVAL:
+            self._last_imu_flush = now
+            self._flush_imu_to_engine()
+
+    def _flush_imu_to_engine(self):
+        # C3: utiliser yaw SLAM si tracker initialisé, sinon fallback IMU
+        if self.engine.tracker.initialized:
+            yaw_source = self.engine.yaw_deg  # déjà mis à jour par _update_tracker
+        else:
+            yaw_source = self._imu_yaw_raw
         self.engine.update_sensors(
-            yaw=float(msg.linear.x),
-            omega_z=float(msg.linear.y),
+            yaw=yaw_source,
+            omega_z=self._imu_omega_raw,
             odom=dict(self._odom),
             us=list(self.engine.us),
             us_limit=self._us_limit,

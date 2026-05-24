@@ -32,9 +32,9 @@ if ! command -v ros2 &> /dev/null; then
     exit 1
 fi
 
-echo "[2/5] Starting micro-ROS Agent on UDP port 8888..."
-# Launch micro-ros agent in background
-ros2 run micro_ros_agent micro_ros_agent udp4 --port 8888 &
+echo "[2/5] Starting micro-ROS Agent on Serial (USB)..."
+# Launch micro-ros agent in background (Serial mode)
+ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0 -b 115200 &
 AGENT_PID=$!
 echo "Agent PID: $AGENT_PID"
 sleep 2
@@ -45,11 +45,11 @@ if ! kill -0 $AGENT_PID 2>/dev/null; then
     exit 1
 fi
 
-echo "[3/5] Starting Flask Web Interface..."
-# Launch Flask app in background
-cd ~/micro_ros_ws/src/micro_ros_flask
+echo "[3/5] Starting Flask-ROS Bridge..."
+# Launch Flask-ROS bridge (UI interface)
+cd ~/ros2_ws/src/micro_ros_robot/ubuntu_ros2
 source /opt/ros/humble/setup.bash
-source install/setup.bash 2>/dev/null || true
+source ~/ros2_ws/install/setup.bash
 python3 flask_ros_bridge.py &
 FLASK_PID=$!
 echo "Flask PID: $FLASK_PID"
@@ -63,8 +63,8 @@ echo ""
 echo "=========================================="
 echo "  STATUS"
 echo "=========================================="
-echo "  micro-ROS Agent : PID $AGENT_PID (UDP :8888)"
-echo "  Flask Web       : PID $FLASK_PID (http://localhost:5000)"
+echo "  micro-ROS Agent : PID $AGENT_PID (Serial /dev/ttyUSB0)"
+echo "  Flask-ROS Bridge: PID $FLASK_PID (http://localhost:5000)"
 echo ""
 echo "  ROS Topics available:"
 ros2 topic list 2>/dev/null || echo "  (waiting for ESP32)"
@@ -72,7 +72,8 @@ echo ""
 echo "  To stop all: kill $AGENT_PID $FLASK_PID"
 echo "=========================================="
 echo ""
-echo "Connect ESP32 with micro-ROS firmware to see topics!"
+echo "Connect ESP32 via USB to /dev/ttyUSB0 for micro-ROS!"
+echo "Open browser at http://localhost:5000 for UI control"
 
 # Wait for ctrl-c
 trap "echo 'Stopping...'; kill $AGENT_PID $FLASK_PID 2>/dev/null; exit" INT TERM
