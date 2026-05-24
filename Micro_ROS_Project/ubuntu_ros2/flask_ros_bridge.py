@@ -51,7 +51,9 @@ import io
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
 from collections import deque
+from PIL import Image, ImageDraw, ImageFont
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CAMERA CALIBRATION (from calibrate_camera.py)
@@ -577,6 +579,46 @@ def api_mission_ctrl():
     ros_bridge.send_mission_ctrl(data)
     return jsonify({"status": "ok", "sent": data})
 
+# ─── LAB MODE API ────────────────────────────────────────────────────────────
+_lab_mode = {'mode': 'normal', 'auto_us': True, 'debug': False, 'active': False}
+
+@app.route('/api/lab_mode', methods=['POST'])
+def api_lab_mode():
+    """Configure le mode Lab (test/développement)."""
+    global _lab_mode
+    data = json.loads(request.data or '{}')
+    _lab_mode['mode'] = data.get('mode', 'normal')
+    _lab_mode['auto_us'] = data.get('auto_us', True)
+    _lab_mode['debug'] = data.get('debug', False)
+    logger.info(f"[LAB] Mode={_lab_mode['mode']}, AutoUS={_lab_mode['auto_us']}, Debug={_lab_mode['debug']}")
+    return jsonify({"status": "ok", "lab_mode": _lab_mode})
+
+@app.route('/api/lab_mode', methods=['GET'])
+def get_lab_mode():
+    """Retourne le mode Lab actuel."""
+    return jsonify(_lab_mode)
+
+@app.route('/service/start_lab', methods=['POST'])
+def start_lab():
+    """Démarre le mode Lab."""
+    global _lab_mode
+    _lab_mode['active'] = True
+    logger.info(f"[LAB] Started in {_lab_mode['mode']} mode")
+    # Publier vers mission_ctrl pour activer le mode lab
+    if ros_bridge:
+        ros_bridge.send_mission_ctrl({'lab_mode': _lab_mode['mode'], 'action': 'start'})
+    return jsonify({"status": "ok", "lab_mode": _lab_mode})
+
+@app.route('/service/stop_lab', methods=['POST'])
+def stop_lab():
+    """Arrête le mode Lab."""
+    global _lab_mode
+    _lab_mode['active'] = False
+    logger.info("[LAB] Stopped")
+    if ros_bridge:
+        ros_bridge.send_mission_ctrl({'action': 'stop'})
+    return jsonify({"status": "ok", "lab_mode": _lab_mode})
+
 # ─── ROBOT CONFIG GLOBAL (source de vérité partagée) ───────────────────────
 _DATA_ROOT   = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROBOT_CONFIG_FILE = os.path.join(_DATA_ROOT, "data", "robot_config.json")
@@ -693,6 +735,153 @@ def service_route(service_name):
         return jsonify({"status": "error", "message": "Unknown service"})
 
     return jsonify({"status": "ok", "service": service_name})
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2D MAP VISUALIZATION
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Map data storage (updated by mission_engine via topics)
+_map_data = {
+    'robot_pose': {'x': 0.33, 'y': 0.05, 'yaw': 0.0},  # Default home position
+    'tags': {},  # {tag_id: {'x': x, 'y': y, 'conf': 0.0-1.0, 'confirmed': False}}
+    'current_path': [],  # List of (x, y) waypoints
+    'scanning': False,
+    'arena': {'width': 0.66, 'height': 0.47}  # 66x47cm in meters
+}
+
+def _update_map_from_telemetry():
+    """Update map data from ROS bridge telemetry."""
+    global _map_data
+    if ros_bridge and hasattr(ros_bridge, 'odom'):
+        _map_data['robot_pose'] = {
+            'x': ros_bridge.odom.get('x', 0.33),
+            'y': ros_bridge.odom.get('y', 0.05),
+            'yaw': ros_bridge.odom.get('yaw', 0.0)
+        }
+
+@app.route('/api/map', methods=['GET'])
+def api_get_map():
+    """Returns current 2D map data as JSON."""
+    _update_map_from_telemetry()
+    return jsonify(_map_data)
+
+@app.route('/api/map/update', methods=['POST'])
+def api_update_map():
+    """Updates map data from mission_engine (tags, scanning status, path)."""
+    global _map_data
+    try:
+        data = json.loads(request.data or '{}')
+        
+        if 'tags' in data:
+            _map_data['tags'] = data['tags']
+        if 'scanning' in data:
+            _map_data['scanning'] = data['scanning']
+        if 'current_path' in data:
+            _map_data['current_path'] = data['current_path']
+        if 'robot_pose' in data:
+            _map_data['robot_pose'] = data['robot_pose']
+        
+        return jsonify({"status": "ok", "tags_count": len(_map_data['tags'])})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/map_feed')
+def map_feed():
+    """Generates real-time 2D map image (PNG)."""
+    _update_map_from_telemetry()
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=100)
+    ax.set_xlim(-0.05, 0.71)  # Slightly larger than arena
+    ax.set_ylim(-0.05, 0.52)
+    ax.set_aspect('equal')
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_title('Robot Map - 2D Visualization')
+    ax.grid(True, alpha=0.3)
+    
+    # Draw arena border
+    arena = Rectangle((0, 0), 0.66, 0.47, fill=False, edgecolor='black', linewidth=2)
+    ax.add_patch(arena)
+    
+    # Draw zones
+    zones = {
+        'Home (12)': (0.33, 0.05, 'gray'),
+        'Manufacturing (3)': (0.33, 0.42, 'orange'),
+        'Station A (9)': (0.15, 0.16, 'lightgreen'),
+        'Station B (6)': (0.51, 0.23, 'lightblue')
+    }
+    for name, (x, y, color) in zones.items():
+        circle = Circle((x, y), 0.03, color=color, alpha=0.3)
+        ax.add_patch(circle)
+        ax.text(x, y, name, ha='center', va='center', fontsize=7)
+    
+    # Draw confirmed tags (green) and unconfirmed (red/orange)
+    for tid, tag in _map_data['tags'].items():
+        x, y = tag.get('x', 0), tag.get('y', 0)
+        confirmed = tag.get('confirmed', False)
+        conf = tag.get('conf', 0.0)
+        
+        if confirmed:
+            color = 'green'
+            size = 0.025
+        elif conf > 0.5:
+            color = 'orange'
+            size = 0.02
+        else:
+            color = 'red'
+            size = 0.015
+        
+        circle = Circle((x, y), size, color=color, alpha=0.7)
+        ax.add_patch(circle)
+        ax.text(x, y + 0.04, f'#{tid}', ha='center', va='bottom', fontsize=8, 
+                color='green' if confirmed else 'red')
+    
+    # Draw A* path
+    if _map_data['current_path']:
+        path_x = [p[0] for p in _map_data['current_path']]
+        path_y = [p[1] for p in _map_data['current_path']]
+        ax.plot(path_x, path_y, 'b--', linewidth=2, alpha=0.6, label='Path')
+    
+    # Draw robot
+    pose = _map_data['robot_pose']
+    x, y, yaw = pose['x'], pose['y'], pose['yaw']
+    
+    # Robot body
+    robot_circle = Circle((x, y), 0.04, color='blue', alpha=0.8)
+    ax.add_patch(robot_circle)
+    
+    # Direction arrow
+    dx = 0.08 * np.cos(yaw)
+    dy = 0.08 * np.sin(yaw)
+    arrow = FancyArrowPatch((x, y), (x + dx, y + dy),
+                            arrowstyle='->', mutation_scale=20,
+                            color='blue', linewidth=2)
+    ax.add_patch(arrow)
+    
+    # Robot label
+    ax.text(x, y - 0.06, 'Robot', ha='center', va='top', fontsize=9, fontweight='bold')
+    
+    # Scan indicator
+    if _map_data['scanning']:
+        scan_circle = Circle((x, y), 0.15, fill=False, edgecolor='cyan', linewidth=2, linestyle='--')
+        ax.add_patch(scan_circle)
+        ax.text(0.33, 0.50, '🔍 SCANNING...', ha='center', fontsize=12, color='cyan', fontweight='bold')
+    
+    # Legend
+    ax.plot([], [], 'go', markersize=10, label='Tag confirmed')
+    ax.plot([], [], 'ro', markersize=8, label='Tag unconfirmed')
+    ax.legend(loc='upper right', fontsize=8)
+    
+    plt.tight_layout()
+    
+    # Save to buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', facecolor='white')
+    buf.seek(0)
+    plt.close(fig)
+    
+    return Response(buf, mimetype='image/png')
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN - ROS SPINNER

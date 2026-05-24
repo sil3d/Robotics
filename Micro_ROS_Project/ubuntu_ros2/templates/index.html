@@ -47,8 +47,13 @@
                 <div class="panel-title"><span>Video Streams</span></div>
                 <div class="video-grid">
                     <div class="video-wrapper">
-                        <img src="{{ url_for('map_feed') }}" alt="SLAM Map">
-                        <div class="video-label">Robot Map</div>
+                        <img src="{{ url_for('map_feed') }}" alt="2D Map" id="map2d-feed" style="width:100%; max-height:300px;">
+                        <div class="video-label">🗺️ 2D Map (Real-time)</div>
+                        <div style="position:absolute; bottom:8px; left:8px; background:rgba(0,0,0,0.7); padding:4px 8px; border-radius:4px; font-size:0.7em;">
+                            <span style="color:lime;">●</span> Confirmed 
+                            <span style="color:red;">●</span> Unconfirmed
+                            <span style="color:cyan;">●</span> Scanning
+                        </div>
                     </div>
                     <div class="video-wrapper">
                         <img src="{{ url_for('imu3d_feed') }}" alt="IMU 3D">
@@ -132,6 +137,20 @@
             <div class="panel">
                 <div class="panel-title">Mission Config</div>
                 <div id="missionList" style="font-size:0.85em; color:#ccc; margin-bottom:8px;">Loading...</div>
+                
+                <!-- Templates rapides -->
+                <div style="margin-bottom:10px; padding:8px; background:#1a1a2e; border-radius:4px;">
+                    <label style="color:#aaa; font-size:0.85em; display:block; margin-bottom:5px;">Quick Templates:</label>
+                    <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:5px;">
+                        <button onclick="setMissionTemplate(1)" style="font-size:0.8em; padding:5px;">1 Cube</button>
+                        <button onclick="setMissionTemplate(2)" style="font-size:0.8em; padding:5px;">2 Cubes</button>
+                        <button onclick="setMissionTemplate(3)" style="font-size:0.8em; padding:5px;">3 Cubes</button>
+                        <button onclick="setMissionTemplate(6)" style="font-size:0.8em; padding:5px;">6 Cubes</button>
+                        <button onclick="setMissionTemplate('alternate')" style="font-size:0.8em; padding:5px;">Alt. Colors</button>
+                        <button onclick="clearMissions()" style="font-size:0.8em; padding:5px; background:#500;">Clear</button>
+                    </div>
+                </div>
+                
                 <div style="margin-bottom:6px;">
                     <label style="color:#aaa;">Home Tag: <input type="number" id="missionHomeTag" value="12" style="width:50px; background:#222; color:#fff; border:1px solid #444;"></label>
                     <label style="color:#aaa; margin-left:10px;"><input type="checkbox" id="missionRepeat" checked> Repeat</label>
@@ -163,6 +182,44 @@
                     <button onclick="sendGripper('0')">0°</button>
                     <button onclick="sendGripper('90')">90°</button>
                     <button onclick="sendGripper('180')">180°</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Robot Speed</div>
+                <div style="margin-bottom:10px;">
+                    <label style="color:#aaa; font-size:0.9em;">Max Speed: <span id="speedValue">0.30</span> m/s</label>
+                    <input type="range" id="speedSlider" min="0.1" max="0.6" step="0.05" value="0.30" style="width:100%; margin-top:5px;" oninput="updateSpeed(this.value)">
+                </div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+                    <button onclick="setSpeed(0.15)">Slow (0.15)</button>
+                    <button onclick="setSpeed(0.30)">Normal (0.30)</button>
+                    <button onclick="setSpeed(0.45)">Fast (0.45)</button>
+                    <button onclick="setSpeed(0.60)">Max (0.60)</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Lab Mode</div>
+                <div style="margin-bottom:8px;">
+                    <label style="color:#aaa; font-size:0.9em;">Mode:</label>
+                    <select id="labMode" style="width:100%; background:#222; color:#fff; border:1px solid #444; padding:5px; margin-top:5px;" onchange="setLabMode(this.value)">
+                        <option value="normal">Normal</option>
+                        <option value="scan">Scan Only</option>
+                        <option value="approach">Approach Test</option>
+                        <option value="gripper">Gripper Test</option>
+                        <option value="navigation">Navigation Test</option>
+                    </select>
+                </div>
+                <div style="margin-bottom:8px;">
+                    <label style="color:#aaa; font-size:0.9em;"><input type="checkbox" id="labAutoUS" checked onchange="toggleAutoUS()"> Auto Ultrasonic</label>
+                </div>
+                <div style="margin-bottom:8px;">
+                    <label style="color:#aaa; font-size:0.9em;"><input type="checkbox" id="labDebug" onchange="toggleDebug()"> Debug Mode</label>
+                </div>
+                <div class="action-buttons">
+                    <button onclick="startLab()">Start Lab</button>
+                    <button onclick="stopLab()">Stop Lab</button>
                 </div>
             </div>
 

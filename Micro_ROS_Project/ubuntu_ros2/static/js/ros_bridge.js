@@ -166,13 +166,59 @@ function sendUltrasonicMask(mask) {
 }
 
 // ── Velocity control ─────────────────────────────────────────────────────────
-function moveForward()  { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear:  0.2, angular:  0})}); }
-function moveBackward() { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear: -0.2, angular:  0})}); }
+function moveForward()  { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear:  currentSpeed, angular:  0})}); }
+function moveBackward() { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear: -currentSpeed, angular:  0})}); }
 function turnLeft()     { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear:  0,   angular:  0.5})}); }
 function turnRight()    { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear:  0,   angular: -0.5})}); }
 function stopMove()     { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear:  0,   angular:  0})}); }
 function stopTurn()     { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear:  0,   angular:  0})}); }
 function stopRobot()    { fetch('/velocity', {method: 'POST', body: JSON.stringify({linear:  0,   angular:  0})}); }
+
+// ── Speed control ──────────────────────────────────────────────────────────
+let currentSpeed = 0.30;
+
+function updateSpeed(val) {
+    currentSpeed = parseFloat(val);
+    document.getElementById('speedValue').textContent = currentSpeed.toFixed(2);
+}
+
+function setSpeed(val) {
+    currentSpeed = val;
+    document.getElementById('speedSlider').value = val;
+    document.getElementById('speedValue').textContent = val.toFixed(2);
+}
+
+// ── Lab Mode control ─────────────────────────────────────────────────────────
+let labMode = 'normal';
+let labAutoUS = true;
+let labDebug = false;
+
+function setLabMode(mode) {
+    labMode = mode;
+    fetch('/api/lab_mode', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mode: mode, auto_us: labAutoUS, debug: labDebug})
+    });
+}
+
+function toggleAutoUS() {
+    labAutoUS = document.getElementById('labAutoUS').checked;
+    setLabMode(labMode);
+}
+
+function toggleDebug() {
+    labDebug = document.getElementById('labDebug').checked;
+    setLabMode(labMode);
+}
+
+function startLab() {
+    fetch('/service/start_lab', {method: 'POST'});
+}
+
+function stopLab() {
+    fetch('/service/stop_lab', {method: 'POST'});
+}
 
 // ── Mission editor ───────────────────────────────────────────────────────────
 let missionRows = [];
@@ -234,6 +280,64 @@ function saveMissions() {
     });
 }
 
+// ── Mission Templates ──────────────────────────────────────────────────────
+function setMissionTemplate(template) {
+    const PICKUP_TAG = 3;  // Manufacturing
+    // D'après schéma réel: Station A (tag 9) = VERT, Station B (tag 6) = BLEU
+    const DROP_GREEN = 9;  // Station A (gauche) - cubes VERTS
+    const DROP_BLUE = 6;   // Station B (droite) - cubes BLEUS
+    
+    missionRows = [];
+    
+    if (template === 1) {
+        // 1 cube - vert par défaut à Station A
+        missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_GREEN, color: 'green', label: '1 cube → Station A'});
+    } else if (template === 2) {
+        // 2 cubes - 1 vert (Station A) + 1 bleu (Station B)
+        missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_GREEN, color: 'green', label: 'Cube vert → Station A'});
+        missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_BLUE, color: 'blue', label: 'Cube bleu → Station B'});
+    } else if (template === 3) {
+        // 3 cubes - alternance vert/bleu/vert
+        missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_GREEN, color: 'green', label: '#1 Vert → A'});
+        missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_BLUE, color: 'blue', label: '#2 Bleu → B'});
+        missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_GREEN, color: 'green', label: '#3 Vert → A'});
+    } else if (template === 6) {
+        // 6 cubes - 3 verts (Station A) + 3 bleus (Station B)
+        for (let i = 1; i <= 3; i++) {
+            missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_GREEN, color: 'green', label: `#${i*2-1} Vert → A`});
+            missionRows.push({pickup_tag: PICKUP_TAG, drop_tag: DROP_BLUE, color: 'blue', label: `#${i*2} Bleu → B`});
+        }
+    } else if (template === 'alternate') {
+        // Alternance forcée vert/bleu/vert/bleu...
+        const count = prompt('Nombre de cubes pour alternance:', '4');
+        const n = parseInt(count) || 4;
+        for (let i = 0; i < n; i++) {
+            const isGreen = i % 2 === 0;  // Start with green (Station A)
+            missionRows.push({
+                pickup_tag: PICKUP_TAG,
+                drop_tag: isGreen ? DROP_GREEN : DROP_BLUE,
+                color: isGreen ? 'green' : 'blue',
+                label: `#${i+1} ${isGreen ? 'Vert→A' : 'Bleu→B'}`
+            });
+        }
+    }
+    
+    renderMissionRows();
+    document.getElementById('missionList').textContent = missionRows.length + ' mission(s) configurées';
+    
+    // Sauvegarde auto
+    saveMissions();
+}
+
+function clearMissions() {
+    if (confirm('Effacer toutes les missions ?')) {
+        missionRows = [];
+        renderMissionRows();
+        document.getElementById('missionList').textContent = '0 mission';
+        saveMissions();
+    }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 document.querySelectorAll('.us-toggle-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -242,5 +346,26 @@ document.querySelectorAll('.us-toggle-btn').forEach((btn) => {
         sendUltrasonicMask(usMaskState);
     });
 });
+
+// ── 2D Map Auto-Refresh ─────────────────────────────────────────────────────
+function refreshMap2D() {
+    const img = document.getElementById('map2d-feed');
+    if (img) {
+        // Add timestamp to force refresh
+        const url = '/map_feed?t=' + Date.now();
+        img.src = url;
+    }
+}
+
+// Refresh map every 500ms during scan, every 2s otherwise
+let mapRefreshInterval = 2000;
+setInterval(() => {
+    const scanState = document.getElementById('scanState');
+    const isScanning = scanState && scanState.textContent.includes('SCAN');
+    mapRefreshInterval = isScanning ? 500 : 2000;
+}, 1000);
+
+setInterval(refreshMap2D, mapRefreshInterval);
+
 loadMissions();
 setInterval(updateTelemetry, 100);

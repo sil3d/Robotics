@@ -35,5 +35,17 @@
     "pid_angular_kd": 1.0,
     "obstacle_threshold_near": 0.08,
     "obstacle_threshold_far": 0.15
+  },
+  "arena": {
+    "_comment": "Dimensions réelles du terrain (cm) - 66x47cm basé sur le schéma",
+    "width_cm": 66,
+    "length_cm": 47,
+    "home_tag": 12,
+    "zones": {
+      "manufacturing": {"x_cm": 33, "y_cm": 37, "tag_id": 3, "dist_from_tag_cm": 10},
+      "station_A": {"x_cm": 15, "y_cm": 16, "color": "blue", "tag_id": 9, "dist_from_tag_cm": 15},
+      "station_B": {"x_cm": 51, "y_cm": 23, "color": "green", "tag_id": 6, "dist_from_tag_cm": 15},
+      "home": {"x_cm": 33, "y_cm": 5, "tag_id": 12}
+    }
   }
 }

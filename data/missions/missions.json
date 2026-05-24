@@ -1,20 +1,31 @@
 {
+  "_comment": "Missions pick & place - Terrain réel: 66x47cm. Station A (tag 9) = VERT, Station B (tag 6) = BLEU",
   "missions": [
     {
       "id": 1,
       "pickup_tag": 3,
-      "drop_tag": 6,
-      "color": "blue",
-      "label": "Cube bleu → Station B"
+      "drop_tag": 9,
+      "color": "green",
+      "label": "Manufacturing → Station A (green)"
     },
     {
       "id": 2,
       "pickup_tag": 3,
-      "drop_tag": 9,
-      "color": "green",
-      "label": "Cube vert → Station A"
+      "drop_tag": 6,
+      "color": "blue",
+      "label": "Manufacturing → Station B (blue)"
     }
   ],
   "home_tag": 12,
-  "repeat": true
+  "repeat": true,
+  "arena": {
+    "width_cm": 66,
+    "length_cm": 47,
+    "zones": {
+      "manufacturing": {"tag_id": 3, "approach_dist_cm": 10, "x_cm": 33, "y_cm": 37},
+      "station_A": {"tag_id": 9, "color": "green", "approach_dist_cm": 15, "x_cm": 15, "y_cm": 16},
+      "station_B": {"tag_id": 6, "color": "blue", "approach_dist_cm": 15, "x_cm": 51, "y_cm": 23},
+      "home": {"tag_id": 12, "x_cm": 33, "y_cm": 5}
+    }
+  }
 }

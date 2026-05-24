@@ -41,6 +41,7 @@ import os
 import sys
 import numpy as np
 import heapq
+import requests  # For updating 2D map visualization
 
 from lstm_assistant import LSTMAssistant
 
@@ -62,18 +63,37 @@ from auto_detetc_tag_arduino import (
 )
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-# Tags dans l'environnement
+# Tags dans l'environnement - Terrain réel: 66x47cm (basé sur le schéma)
 # Structure: {tag_id: {"role": str, "x": float, "y": float}}
 # role: "home" | "manufacture" | "drop_blue" | "drop_green"
+# Coordonnées en mètres (origine: coin inférieur gauche du terrain)
 TAG_MAP = {
-    12: {"role": "home",         "x": 0.934,  "y": 0.241},
-    3:  {"role": "manufacture",  "x": 1.151,  "y": 0.135},
-    6:  {"role": "drop_blue",    "x": 0.944,  "y": 0.483},   # Station B
-    9:  {"role": "drop_green",   "x": 0.374,  "y": 0.029},   # Station A
+    # Home - Bas centre (tag 12 au milieu du bord inférieur)
+    12: {"role": "home",         "x": 0.33,   "y": 0.05},    # Centre bas
+    
+    # Manufacturing - Haut centre (tag 3 au milieu du bord supérieur)
+    3:  {"role": "manufacture",  "x": 0.33,   "y": 0.42},    # 37cm du bas = 47-5-?
+    
+    # Station B - Droite milieu (tag 6) → cubes BLEUS
+    6:  {"role": "drop_blue",    "x": 0.51,   "y": 0.23},    # x=51cm, y=23cm
+    
+    # Station A - Gauche milieu (tag 9) → cubes VERTS
+    9:  {"role": "drop_green",   "x": 0.15,   "y": 0.16},    # x=15cm, y=16cm
+    
+    # Tags périphériques pour A* pathfinding
+    1:  {"role": "wall",         "x": 0.11,   "y": 0.47},    # Haut gauche
+    2:  {"role": "wall",         "x": 0.55,   "y": 0.47},    # Haut droite
+    4:  {"role": "wall",         "x": 0.66,   "y": 0.40},    # Droite haut
+    5:  {"role": "wall",         "x": 0.66,   "y": 0.305},   # Droite milieu-haut
+    7:  {"role": "wall",         "x": 0.66,   "y": 0.16},    # Droite milieu-bas
+    8:  {"role": "wall",         "x": 0.66,   "y": 0.08},    # Droite bas
+    10: {"role": "wall",         "x": 0.00,   "y": 0.08},    # Gauche bas
+    11: {"role": "wall",         "x": 0.00,   "y": 0.23},    # Gauche milieu
 }
 
 HOME_TAG     = 12
 PICKUP_TAG   = 3
+# D'après le schéma réel: Station A (tag 9) = vert, Station B (tag 6) = bleu
 DROP_TAG     = {"blue": 6, "green": 9}
 
 # Fichier de missions configurable
@@ -84,8 +104,11 @@ MISSIONS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.
 NAV_DIST_THRESHOLD  = 0.12   # m — considéré "arrivé" si < cette distance
 NAV_ANGLE_THRESHOLD = 8.0    # deg — aligné si < cet angle
 APPROACH_DIST_CM    = 12.0   # cm — distance finale pour saisir le cube
-SCAN_OMEGA          = 0.4    # rad/s — vitesse rotation scan
+SCAN_OMEGA          = 0.25   # rad/s — vitesse rotation scan (lente et smooth)
 NAV_LINEAR_SPEED    = 0.18   # m/s — vitesse navigation
+PRECISION_SPEED     = 0.06   # m/s — vitesse positionnement fin (très lent)
+DROP_SQUARE_SIZE    = 15.0   # cm — taille du carré de dépôt
+PRECISION_THRESHOLD = 0.02   # m — précision positionnement (2cm)
 STOP_DIST_CM        = 8.0    # cm — distance arrêt obstacle (firmware gère < 3cm)
 STUCK_TIMEOUT_S     = 4.0    # s sans avancer = coincé
 
@@ -162,6 +185,7 @@ class State:
     OPEN_GRIPPER    = "OPEN_GRIPPER"
     APPROACH_CUBE   = "APPROACH_CUBE"
     CLOSE_GRIPPER   = "CLOSE_GRIPPER"
+    PRECISION_DROP  = "PRECISION_DROP"  # Positionnement fin dans le carré
     RELEASE         = "RELEASE"
     RECORD          = "RECORD"
     AVOID           = "AVOID"
@@ -398,15 +422,71 @@ class MissionEngine:
     def log(self, msg: str):
         self._log_cb(msg)
 
+    def _update_map_2d(self, scanning=False):
+        """Sends robot pose, tags status and path to Flask 2D map API."""
+        try:
+            # Build tags dict with confirmation status
+            tags_data = {}
+            for tid, tag in self.tag_map.tags.items():
+                x, y = tag.get('x', 0), tag.get('y', 0)
+                conf = tag.get('conf', 0.0)
+                views = tag.get('views', 0)
+                # Confirmed if high confidence or multiple views
+                confirmed = conf >= 0.9 or views >= 3
+                tags_data[tid] = {
+                    'x': x / 100.0,  # cm to m
+                    'y': y / 100.0,
+                    'conf': conf,
+                    'confirmed': confirmed
+                }
+            
+            # Current path in meters
+            path_data = []
+            if hasattr(self, 'current_path') and self.current_path:
+                path_data = [[p[0], p[1]] for p in self.current_path]
+            
+            # Robot pose
+            pose_data = {
+                'x': self.tracker.pos_x,
+                'y': self.tracker.pos_y,
+                'yaw': self.tracker.yaw
+            }
+            
+            payload = {
+                'tags': tags_data,
+                'scanning': scanning or (self.state == State.SCAN_360),
+                'current_path': path_data,
+                'robot_pose': pose_data
+            }
+            
+            # Send to Flask API (async, don't block mission)
+            threading.Thread(
+                target=lambda: requests.post(
+                    'http://localhost:5000/api/map/update',
+                    json=payload,
+                    timeout=0.5
+                ),
+                daemon=True
+            ).start()
+        except Exception:
+            pass  # Fail silently to not block mission
+
     # ─── BOUCLE PRINCIPALE ────────────────────────────────────────────────────
 
     def _loop(self):
         rate = 0.05   # 20 Hz
+        map_update_counter = 0
         while self.running:
             try:
                 # ─── Localisation : met à jour le tracker à chaque tick ───
                 self._update_tracker()
                 self._step()
+                
+                # ─── Update 2D map visualization every 10 iterations (~0.5s) ───
+                map_update_counter += 1
+                if map_update_counter >= 10:
+                    self._update_map_2d()
+                    map_update_counter = 0
             except Exception as e:
                 self.log(f"ERREUR état {self.state}: {e}")
                 self._set_state(State.ERROR)
@@ -487,6 +567,8 @@ class MissionEngine:
             self._step_approach()
         elif s == State.CLOSE_GRIPPER:
             self._step_close_gripper()
+        elif s == State.PRECISION_DROP:
+            self._step_precision_drop()
         elif s == State.RELEASE:
             self._step_release()
         elif s == State.RECORD:
@@ -508,22 +590,51 @@ class MissionEngine:
             self._set_state(State.SCAN_360)
 
     def _step_scan(self):
-        """Rotation 360° SLAM : cartographie les tags avec positions absolues."""
+        """Scan 360° SLAM : va au centre du terrain puis tourne lentement."""
+        # Update 2D map with scanning indicator
+        self._update_map_2d(scanning=True)
+        
+        # Phase 1: Aller au centre du terrain (33cm, 23.5cm)
+        CENTER_X = 0.33  # 33 cm
+        CENTER_Y = 0.235 # 23.5 cm (milieu de 47cm)
+        
+        if not hasattr(self, '_scan_center_reached'):
+            self._scan_center_reached = False
+        
+        if not self._scan_center_reached:
+            # Navigation vers le centre
+            dx = CENTER_X - self.tracker.pos_x
+            dy = CENTER_Y - self.tracker.pos_y
+            dist = math.hypot(dx, dy)
+            
+            if dist > 0.05:  # 5cm tolerance
+                # Calcul angle vers centre
+                angle_to_center = math.atan2(dy, dx)
+                yaw_err = self._angle_diff(math.degrees(angle_to_center), math.degrees(self.tracker.yaw))
+                
+                # Alignement progressif smooth
+                omega = max(-0.3, min(0.3, math.radians(yaw_err) * 1.5))
+                speed = 0.12 if abs(yaw_err) < 30 else 0.0  # avance si bien aligné
+                
+                self.send_velocity(speed, omega)
+                self.log(f"Scan: va au centre ({dist*100:.0f}cm)")
+                return
+            else:
+                self._scan_center_reached = True
+                self.log("Scan: centre atteint, début rotation")
+        
+        # Phase 2: Rotation 360° lente depuis le centre
         if self.scan_start_yaw is None:
-            # Initialisation scan : reset position et yaw
             self.arduino.reset_yaw()
             time.sleep(0.1)
-            # M5: clear seulement si aucun tag connu (premier scan ou map vide).
-            # Si des tags sont déjà cartographiés (prior_map), on fusionne pour
-            # ne pas perdre les confirmations précédentes.
             if not self.tag_map.tags:
                 self.tag_map.tags.clear()
             self.tracker.reset_to(0.0, 0.0, 0.0)
             self.scan_start_yaw  = 0.0
             self.scan_turned_deg = 0.0
-            self.log("Scan 360° SLAM démarré — tourne lentement")
+            self.log("Scan 360° SLAM démarré depuis le centre — rotation lente smooth")
 
-        # Rotation lente
+        # Rotation lente fixe (vitesse constante pour stabilité)
         self.send_velocity(0.0, SCAN_OMEGA)
 
         # Le tracker est déjà mis à jour en scan_mode par _update_tracker()
@@ -547,6 +658,7 @@ class MissionEngine:
             self.tracker.reset_to(0.0, 0.0, self.tracker.yaw)
 
             self.scan_start_yaw = None
+            self._scan_center_reached = False  # Reset pour prochain scan
             self.log(f"Scan terminé : {len(self.tag_map.tags)} tags cartographiés")
             self._choose_mission()
 
@@ -681,8 +793,10 @@ class MissionEngine:
         self.log(f"Arrivé au tag {target}")
 
         if target == self.drop_tag_id:
-            # Arrivé à la station → déposer le cube
-            self._set_state(State.RELEASE)
+            # Arrivé à la station → positionnement précis dans le carré
+            self._set_state(State.PRECISION_DROP)
+            # Calcul position exacte du centre du carré de dépôt
+            self._compute_drop_target()
         elif target == self.missions_home_tag:
             # Retour à HOME → enregistrer
             self._save_trajectory()
@@ -787,22 +901,80 @@ class MissionEngine:
         # target_color et drop_tag_id déjà définis par _advance_to_next_pickup
         self._navigate_to_tag(self.drop_tag_id, f"Drop {self.target_color} (tag {self.drop_tag_id})")
 
+    def _compute_drop_target(self):
+        """Calcule la position exacte du centre du carré de dépôt."""
+        # Position du tag de drop
+        tag_info = TAG_MAP.get(self.drop_tag_id, {})
+        tag_x = tag_info.get("x", 0) / 100.0  # cm -> m
+        tag_y = tag_info.get("y", 0) / 100.0
+        
+        # Calcul position carré: 15cm devant le tag (vers l'intérieur du terrain)
+        # Le robot doit être dans le carré, pas devant le tag
+        DROP_DEPTH = 0.075  # 7.5cm (centre du carré 15cm)
+        
+        if self.drop_tag_id == 6:  # Station B (droite)
+            # Carré à gauche du tag 6 (vers le centre)
+            self._drop_target_x = tag_x - DROP_DEPTH
+            self._drop_target_y = tag_y
+        elif self.drop_tag_id == 9:  # Station A (gauche)
+            # Carré à droite du tag 9 (vers le centre)
+            self._drop_target_x = tag_x + DROP_DEPTH
+            self._drop_target_y = tag_y
+        else:
+            # Fallback: position tag
+            self._drop_target_x = tag_x
+            self._drop_target_y = tag_y
+        
+        self._drop_aligned = False
+        self._drop_precision_timer = None
+        self.log(f"Carré dépôt cible: ({self._drop_target_x:.3f}, {self._drop_target_y:.3f})")
+
+    def _step_precision_drop(self):
+        """Positionnement fin dans le carré de dépôt (très lent et smooth)."""
+        if not hasattr(self, '_drop_target_x'):
+            self._compute_drop_target()
+        
+        # Distance au centre du carré
+        dx = self._drop_target_x - self.tracker.pos_x
+        dy = self._drop_target_y - self.tracker.pos_y
+        dist = math.hypot(dx, dy)
+        
+        # Angle vers cible
+        target_angle = math.atan2(dy, dx)
+        yaw_err = self._angle_diff(math.degrees(target_angle), math.degrees(self.tracker.yaw))
+        
+        # Si très proche et bien aligné → on est dans le carré
+        if dist < PRECISION_THRESHOLD and abs(yaw_err) < 10:
+            self.send_velocity(0.0, 0.0)
+            if self._drop_precision_timer is None:
+                self._drop_precision_timer = time.time()
+                self.log(f"Positionnement OK, attente 0.5s pour stabilisation")
+            elif time.time() - self._drop_precision_timer > 0.5:
+                self.log(f"✓ Dans le carré de dépôt (précision: {dist*100:.1f}cm)")
+                self._set_state(State.RELEASE)
+            return
+        
+        # Mouvement très lent et smooth vers le centre du carré
+        if dist < 0.05:  # < 5cm: mode ultra-précis
+            speed = PRECISION_SPEED * (dist / 0.05)  # proportionnel à la distance
+            omega = max(-0.2, min(0.2, math.radians(yaw_err) * 2.0))
+        else:
+            speed = PRECISION_SPEED
+            omega = max(-0.3, min(0.3, math.radians(yaw_err) * 1.5))
+        
+        self.send_velocity(speed, omega)
+        self.log(f"Precision: {dist*100:.1f}cm, angle_err: {yaw_err:.1f}°")
+
     def _step_release(self):
         self.send_velocity(0.0, 0.0)
-        # Reculer avant d'ouvrir si le robot est trop près de la box de dépôt
-        # GRIPPER_OPEN = 0° (ouvert), évite que les bras écartent la box
-        front_dist = self.us[0] if self.us[0] > 0 else 999.0
-        if front_dist < GRIPPER_SAFE_OPEN_DIST_CM:
-            self.log(f"Recul avant ouverture gripper (dist={front_dist:.1f}cm < {GRIPPER_SAFE_OPEN_DIST_CM}cm)")
-            self.send_velocity(-0.06, 0.0)
-            time.sleep(0.8)
-            self.send_velocity(0.0, 0.0)
+        # Dépose le cube dans le carré de dépôt
+        self.log(f"Ouverture gripper dans le carré...")
         self.send_gripper(GRIPPER_OPEN)
-        self.log(f"Cube {self.target_color} déposé")
+        self.log(f"✓ Cube {self.target_color} déposé dans le carré")
         time.sleep(0.5)
-        # Recule pour dégager la zone de dépôt
-        self.send_velocity(-0.10, 0.0)
-        time.sleep(1.0)
+        # Recule lentement pour dégager sans pousser le cube
+        self.send_velocity(-0.08, 0.0)
+        time.sleep(0.8)
         self.send_velocity(0.0, 0.0)
         self.mission_count["total"] += 1
         color = self.target_color or "blue"
@@ -964,6 +1136,7 @@ class MissionEngine:
             State.APPROACH_CUBE: 60.0,
             State.CLOSE_GRIPPER: 70.0,
             State.NAVIGATE_WAYPOINT: 75.0,
+            State.PRECISION_DROP: 85.0,
             State.RELEASE: 90.0,
             State.RECORD: 100.0,
             State.AVOID: 45.0,
@@ -974,7 +1147,7 @@ class MissionEngine:
 
     def _record_step(self, action: str):
         """Enregistre un pas pour le LSTM."""
-        if self.state in (State.NAVIGATE_WAYPOINT, State.RELEASE):
+        if self.state in (State.NAVIGATE_WAYPOINT, State.PRECISION_DROP, State.RELEASE):
             target_label = "DROP_BLUE" if self.target_color == "blue" else "DROP_GREEN" if self.target_color == "green" else "HOME" if self.target_tag_id == HOME_TAG else "NAVIGATE"
         elif self.target_tag_id == PICKUP_TAG:
             target_label = "PICKUP"
@@ -1000,7 +1173,7 @@ class MissionEngine:
             "cube_pixel_x": self.cube_pixel_x if self.cube_pixel_x is not None else -1.0,
             "color_confidence": 1.0 if self.cube_pixel_x is not None else 0.0,
             "tag_confidence": 1.0 if self.target_tag_id is not None else 0.0,
-            "gripper_state": 1.0 if self._last_gripper_cmd in (GRIPPER_CLOSE, "close", 20) else 0.0,
+            "gripper_state": 1.0 if self._last_gripper_cmd in (GRIPPER_CLOSE, "close", 180) else 0.0,
             "mission_progress": self._mission_progress_percent(),
             "lstm_enabled": self.lstm.enabled,
             "recording_enabled": self.lstm.recording_enabled,

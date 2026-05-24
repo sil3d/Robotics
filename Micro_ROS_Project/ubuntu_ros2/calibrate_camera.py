@@ -265,9 +265,18 @@ def draw_overlay(frame, calibrator, dets, fps, error_text=""):
 def list_cameras():
     print("\n[INFO] Searching for available cameras...")
     available = []
-    for i in range(2):  # Only check 0 and 1 - skip ffmpeg errors
+    # Platform-specific backend: V4L2 for Linux, DirectShow for Windows
+    import sys
+    if sys.platform == 'linux' or sys.platform == 'linux2':
+        cap_backend = cv2.CAP_V4L2  # Linux V4L2
+    elif sys.platform == 'win32':
+        cap_backend = cv2.CAP_DSHOW  # Windows DirectShow
+    else:
+        cap_backend = cv2.CAP_ANY  # Default for other platforms
+    
+    for i in range(4):  # Check cameras 0-3
         try:
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)  # Use DirectShow for Windows
+            cap = cv2.VideoCapture(i, cap_backend)
             if cap.isOpened():
                 ret, frame = cap.read()
                 if ret and frame is not None and frame.size > 0:
@@ -295,10 +304,19 @@ def main():
     cap = None
     camera_found = False
 
+    # Platform-specific backend (same as list_cameras)
+    import sys
+    if sys.platform == 'linux' or sys.platform == 'linux2':
+        cap_backend = cv2.CAP_V4L2
+    elif sys.platform == 'win32':
+        cap_backend = cv2.CAP_DSHOW
+    else:
+        cap_backend = cv2.CAP_ANY
+    
     for try_idx in [CAMERA_INDEX] + [i for i in available if i != CAMERA_INDEX]:
         for attempt in range(3):
             print(f"  Trying camera {try_idx}, attempt {attempt + 1}...")
-            cap = cv2.VideoCapture(try_idx, cv2.CAP_DSHOW)
+            cap = cv2.VideoCapture(try_idx, cap_backend)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
