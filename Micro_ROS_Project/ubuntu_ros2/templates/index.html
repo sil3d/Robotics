@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Micro-ROS Robot Control</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .video-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+        .video-wrapper { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+        .video-wrapper img { width: 100%; display: block; }
+        .video-label { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.7); padding: 4px 10px; border-radius: 4px; font-size: 0.75em; color: var(--accent); }
+        .status-normal { color: #00ff00; }
+        .status-degraded { color: #ffaa00; }
+        .status-fault { color: #ff6600; }
+        .status-abort { color: #ff0000; }
+        .confidence-bar { height: 20px; background: #333; border-radius: 4px; margin: 8px 0; }
+        .confidence-fill { height: 100%; border-radius: 4px; transition: width 0.3s; background: linear-gradient(90deg, #00ff00, #00aa00); }
+        .action-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+        .action-buttons button { padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; background: #0f3460; color: #e0e0e0; }
+        .action-buttons button:hover { background: #00d4ff; color: #000; }
+        .action-buttons button.emergency { background: #ff0000; color: white; grid-column: span 2; }
+        .controls-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; max-width: 200px; margin: 0 auto; }
+        .ctrl-btn { padding: 12px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; background: #333; color: white; }
+        .ctrl-btn.forward { background: #0066ff; }
+        .ctrl-btn.stop { background: #ff6600; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Micro-ROS Robot Control</h1>
+        <div class="status-bar">
+            <div class="status-indicator">
+                <div class="status-dot" id="connROS">●</div>
+                <span>ROS2</span>
+            </div>
+            <div class="status-indicator">
+                <div class="status-dot" id="connIMU">●</div>
+                <span>IMU</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="video-section">
+            <div class="panel">
+                <div class="panel-title"><span>Video Streams</span></div>
+                <div class="video-grid">
+                    <div class="video-wrapper">
+                        <img src="{{ url_for('map_feed') }}" alt="SLAM Map">
+                        <div class="video-label">Robot Map</div>
+                    </div>
+                    <div class="video-wrapper">
+                        <img src="{{ url_for('imu3d_feed') }}" alt="IMU 3D">
+                        <div class="video-label">IMU 3D</div>
+                    </div>
+                    <div class="video-wrapper">
+                        <img src="{{ url_for('camera_feed') }}" alt="Camera">
+                        <div class="video-label">Camera Feed</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <div class="panel">
+                <div class="panel-title">Robot Mode</div>
+                <div id="robotMode" class="status-normal">UNKNOWN</div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Sensor Health</div>
+                <div id="sensorHealth">
+                    <div>IMU: <span id="imuHealth">--</span></div>
+                    <div>AprilTag: <span id="tagHealth">--</span></div>
+                    <div>Ultrasonics: <span id="usHealth">--</span></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Localization Confidence</div>
+                <div class="confidence-bar">
+                    <div id="confFill" class="confidence-fill" style="width: 0%"></div>
+                </div>
+                <div id="confValue">0%</div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Box Info</div>
+                <div>Color: <span id="boxColor">--</span></div>
+                <div>Orientation: <span id="boxOrient">--</span></div>
+                <div>Distance: <span id="boxDist">--</span>m</div>
+                <div>Width: <span id="boxWidth">--</span>mm</div>
+                <div>Height: <span id="boxHeight">--</span>mm</div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Gripper</div>
+                <div>State: <span id="gripperState">--</span></div>
+                <div>Has Box: <span id="gripperHasBox">--</span></div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Mission</div>
+                <div>Task: <span id="taskState">IDLE</span></div>
+                <div>Mission State: <span id="missionState">IDLE</span></div>
+                <div>Target Color: <span id="missionColor">--</span></div>
+                <div>Target Tag: <span id="missionTag">--</span></div>
+                <div>Scan: <span id="scanState">IDLE</span></div>
+                <div>LSTM: <span id="lstmEnabled">--</span></div>
+                <div>Recording: <span id="lstmRecording">--</span></div>
+                <div>Confidence: <span id="lstmConfidence">--</span></div>
+                <div>Fallback: <span id="lstmFallback">--</span></div>
+                <div style="margin-top:8px;">
+                    <span id="missionProgress" style="font-size:0.85em; color:#00ff00;">0/0</span>
+                    <span style="color:#666;"> missions</span>
+                </div>
+                <div class="action-buttons" style="margin-top:10px;">
+                    <button onclick="startMission()">Start Mission</button>
+                    <button onclick="stopMission()">Stop Mission</button>
+                    <button onclick="resetOdom()">Reset Odom</button>
+                    <button onclick="toggleLstm()" id="lstmToggleBtn">Disable LSTM</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Mission Config</div>
+                <div id="missionList" style="font-size:0.85em; color:#ccc; margin-bottom:8px;">Loading...</div>
+                <div style="margin-bottom:6px;">
+                    <label style="color:#aaa;">Home Tag: <input type="number" id="missionHomeTag" value="12" style="width:50px; background:#222; color:#fff; border:1px solid #444;"></label>
+                    <label style="color:#aaa; margin-left:10px;"><input type="checkbox" id="missionRepeat" checked> Repeat</label>
+                </div>
+                <div id="missionEditor" style="margin-bottom:8px;"></div>
+                <div class="action-buttons" style="margin-top:8px;">
+                    <button onclick="addMissionRow()">+ Add Mission</button>
+                    <button onclick="saveMissions()">Save Missions</button>
+                    <button onclick="loadMissions()">Reload</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Quick Commands</div>
+                <div class="action-buttons">
+                    <button onclick="calibrateGripper()">Calibrate Gripper</button>
+                    <button onclick="startScan()">Start Scan</button>
+                    <button onclick="resetRecovery()">Reset Recovery</button>
+                    <button onclick="resetOdom()">Reset Odom</button>
+                    <button class="emergency" onclick="emergencyStop()">EMERGENCY STOP</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Gripper Control</div>
+                <div class="action-buttons">
+                    <button onclick="sendGripper('open')">Open (180°)</button>
+                    <button onclick="sendGripper('close')">Close (20°)</button>
+                    <button onclick="sendGripper('180')">180°</button>
+                    <button onclick="sendGripper('20')">20°</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Motor Control</div>
+                <div class="controls-grid">
+                    <div></div>
+                    <button class="ctrl-btn forward" onmousedown="moveForward()" onmouseup="stopMove()">FWD</button>
+                    <div></div>
+                    <button class="ctrl-btn" onmousedown="turnLeft()" onmouseup="stopTurn()">LEFT</button>
+                    <button class="ctrl-btn stop" onclick="stopRobot()">STOP</button>
+                    <button class="ctrl-btn" onmousedown="turnRight()" onmouseup="stopTurn()">RIGHT</button>
+                    <div></div>
+                    <button class="ctrl-btn" onmousedown="moveBackward()" onmouseup="stopMove()">BACK</button>
+                    <div></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title"><span>Telemetry</span></div>
+                <div class="imu-data">
+                    <div class="imu-row"><span class="imu-label">Yaw:</span><span class="imu-value" id="imuYaw">-- deg</span></div>
+                    <div class="imu-row"><span class="imu-label">Omega Z:</span><span class="imu-value" id="imuOmega">-- deg/s</span></div>
+                    <div class="imu-row"><span class="imu-label">Accel X:</span><span class="imu-value" id="imuAx">--</span></div>
+                    <div class="imu-row"><span class="imu-label">Accel Y:</span><span class="imu-value" id="imuAy">--</span></div>
+                    <div class="imu-row"><span class="imu-label">Accel Z:</span><span class="imu-value" id="imuAz">--</span></div>
+                </div>
+                <div class="panel-title" style="margin-top:12px;"><span>Ultrasonics</span></div>
+                <div class="sensor-grid">
+                    <div class="sensor-item"><div class="sensor-label">Avant-D (US1)</div><div class="sensor-value" id="us0">-- cm</div></div>
+                    <div class="sensor-item"><div class="sensor-label">Avant-G (US2)</div><div class="sensor-value" id="us1">-- cm</div></div>
+                    <div class="sensor-item"><div class="sensor-label">Arr-G (US3)</div><div class="sensor-value" id="us2">-- cm</div></div>
+                    <div class="sensor-item"><div class="sensor-label">Arr-D (US4)</div><div class="sensor-value" id="us3">-- cm</div></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title"><span>Last Command</span></div>
+                <div id="lastCmd" style="font-family: monospace; padding: 10px; background: #0a0a15; border-radius: 6px;">--</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/ros_bridge.js') }}"></script>
+</body>
+</html>

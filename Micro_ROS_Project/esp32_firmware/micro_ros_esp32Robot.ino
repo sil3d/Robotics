@@ -142,7 +142,8 @@ rcl_publisher_t     imu_pub, us_pub, odom_pub, result_pub, health_pub;
 rcl_subscription_t  vel_sub, gripper_sub, cfg_sub;
 
 geometry_msgs__msg__Accel  imu_msg;
-geometry_msgs__msg__Point  us_msg;
+std_msgs__msg__String      us_msg;
+char us_buf[64];
 geometry_msgs__msg__Point  odom_msg;
 std_msgs__msg__String      result_msg;
 std_msgs__msg__String      health_msg;
@@ -416,9 +417,12 @@ void publishIMU(rcl_timer_t*, int64_t) {
 }
 
 void publishUS(rcl_timer_t*, int64_t) {
-  us_msg.x = usSensors[0].distance;
-  us_msg.y = usSensors[1].distance;
-  us_msg.z = usSensors[2].distance;
+  // US1=avant droit, US2=avant gauche, US3=arrière gauche, US4=arrière droite
+  snprintf(us_buf, sizeof(us_buf), "{\"us\":[%.1f,%.1f,%.1f,%.1f]}",
+    usSensors[0].distance, usSensors[1].distance,
+    usSensors[2].distance, usSensors[3].distance);
+  us_msg.data.data = us_buf;
+  us_msg.data.size = strlen(us_buf);
   rcl_publish(&us_pub, &us_msg, NULL);
 }
 
@@ -566,7 +570,7 @@ void setup() {
 
   // Init messages
   geometry_msgs__msg__Accel__init(&imu_msg);
-  geometry_msgs__msg__Point__init(&us_msg);
+  std_msgs__msg__String__init(&us_msg);
   geometry_msgs__msg__Point__init(&odom_msg);
   std_msgs__msg__String__init(&result_msg);
   std_msgs__msg__String__init(&health_msg);
@@ -576,7 +580,7 @@ void setup() {
 
   // Publishers
   rclc_publisher_init_default(&imu_pub,    &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Accel), "/imu_data");
-  rclc_publisher_init_default(&us_pub,     &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "/ultrasonic_data");
+  rclc_publisher_init_default(&us_pub,     &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/ultrasonic_data");
   rclc_publisher_init_default(&odom_pub,   &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Point), "/odom_data");
   rclc_publisher_init_default(&result_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/cmd_result");
   rclc_publisher_init_default(&health_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs,      msg, String), "/sensor_health");

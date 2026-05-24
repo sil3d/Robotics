@@ -47,7 +47,7 @@ class TaskManagerNode(Node):
         self.mission_log_pub = self.create_publisher(String, "/mission_log", 10)
 
         self.create_subscription(Accel, "/imu_data", self._imu_cb, 10)
-        self.create_subscription(Point, "/ultrasonic_data", self._us_cb, 10)
+        self.create_subscription(String, "/ultrasonic_data", self._us_cb, 10)
         self.create_subscription(Point, "/odom_data", self._odom_cb, 10)
         self.create_subscription(String, "/sensor_health", self._health_cb, 10)
         self.create_subscription(String, "/mission_ctrl", self._mission_ctrl_cb, 10)
@@ -91,8 +91,14 @@ class TaskManagerNode(Node):
             us_limit=self._us_limit,
         )
 
-    def _us_cb(self, msg: Point):
-        self.engine.us = [msg.x, msg.y, msg.z, getattr(msg, "w", -1.0)]
+    def _us_cb(self, msg: String):
+        # Format JSON: {"us":[d0,d1,d2,d3]}
+        # US1=avant droit, US2=avant gauche, US3=arrière gauche, US4=arrière droite
+        try:
+            data = json.loads(msg.data)
+            self.engine.us = [float(v) for v in data["us"]]
+        except Exception:
+            pass
 
     def _odom_cb(self, msg: Point):
         self._odom = {"x": msg.x, "y": msg.y, "yaw": msg.z}

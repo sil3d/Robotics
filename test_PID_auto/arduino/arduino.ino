@@ -29,15 +29,18 @@ const char* password = "robot1234";
 #define SERVO_PIN 19
 
 // ─── ULTRASONS ───
-#define US1_TRIG  5
-#define US1_ECHO  34
-#define US2_TRIG  2
-#define US2_ECHO  35
-#define US3_TRIG  15
-#define US3_ECHO  32
-#define US4_TRIG  33
-#define US4_ECHO  25
-#define US_MAX_DISTANCE 400
+#define US1_TRIG  5 // avant droit
+#define US1_ECHO  34 // avant droit
+#define US2_TRIG  2 // avant gauche
+#define US2_ECHO  35 // avant gauche
+#define US3_TRIG  15 // arrière gauche
+#define US3_ECHO  32 // arrière gauche
+#define US4_TRIG  33 // arriere droite
+#define US4_ECHO  25 // arriere droite
+
+
+
+#define US_MAX_DISTANCE 400 
 #define US_STOP_DISTANCE 3.0  // cm avant obstacle
 
 // ─── CONFIG ───

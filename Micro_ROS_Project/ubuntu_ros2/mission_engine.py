@@ -881,7 +881,9 @@ class MissionEngine:
 
     def _check_obstacle(self) -> bool:
         """Vérifie obstacle imminent. Retourne True si on doit s'arrêter."""
-        front = self.us[0] if self.us[0] > 0 else 999
+        # US1=avant droit (us[0]), US2=avant gauche (us[1]) — prend le minimum valide
+        us_front = [v for v in (self.us[0], self.us[1]) if v > 0]
+        front = min(us_front) if us_front else 999
         if front < STOP_DIST_CM:
             self.send_velocity(0.0, 0.0)
             self._prev_state = self.state

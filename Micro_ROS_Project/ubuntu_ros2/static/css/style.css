@@ -87,6 +87,17 @@ body {
 .imu-row { display: flex; justify-content: space-between; align-items: center; }
 .imu-label { font-size: 0.8em; color: var(--text-dim); }
 .imu-value { font-weight: bold; color: var(--accent); }
+.sidebar { display: flex; flex-direction: column; gap: 15px; overflow-y: auto; max-height: calc(100vh - 70px); }
+.status-normal   { color: #00ff00; }
+.status-degraded { color: #ffaa00; }
+.status-fault    { color: #ff6600; }
+.status-abort    { color: #ff0000; }
+.confidence-bar  { height: 20px; background: #333; border-radius: 4px; margin: 8px 0; }
+.confidence-fill { height: 100%; border-radius: 4px; transition: width 0.3s; background: linear-gradient(90deg, #00ff00, #00aa00); }
+.action-buttons  { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.action-buttons button { padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; background: var(--bg-input); color: var(--text); }
+.action-buttons button:hover { background: var(--accent); color: #000; }
+.action-buttons button.emergency { background: #ff0000; color: white; grid-column: span 2; }
 @media (max-width: 900px) {
     .main-container { grid-template-columns: 1fr; }
     .video-grid { grid-template-columns: 1fr; }
